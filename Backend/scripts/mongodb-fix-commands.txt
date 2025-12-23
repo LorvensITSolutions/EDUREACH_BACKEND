@@ -1,0 +1,23 @@
+// MongoDB Commands to Fix Timetable Index Issue
+// Run these commands in MongoDB shell or MongoDB Compass
+
+// 1. Connect to your database
+use test
+
+// 2. Check current indexes on timetables collection
+db.timetables.getIndexes()
+
+// 3. Drop the problematic unique index
+db.timetables.dropIndex("className_1_section_1_academicYear_1")
+
+// 4. Create a simple index on createdAt only
+db.timetables.createIndex({ "createdAt": -1 })
+
+// 5. Verify the indexes are fixed
+db.timetables.getIndexes()
+
+// 6. Optional: Clear all existing timetables to start fresh
+db.timetables.deleteMany({})
+
+// Alternative: If you want to keep existing data, just drop the problematic index
+// db.timetables.dropIndex("className_1_section_1_academicYear_1")

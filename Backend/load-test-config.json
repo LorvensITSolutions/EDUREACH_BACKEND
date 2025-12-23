@@ -1,0 +1,98 @@
+{
+  "description": "Load test configuration for School Management System",
+  "baseUrl": "https://school-backend-uhbj.onrender.com/api",
+  "localBaseUrl": "http://localhost:5000/api",
+  
+  "testUsers": {
+    "note": "Create test accounts with these credentials for load testing",
+    "admin": {
+      "email": "admin@test.com",
+      "password": "admin123",
+      "role": "admin"
+    },
+    "teacher": {
+      "email": "teacher@test.com",
+      "password": "teacher123",
+      "role": "teacher"
+    },
+    "student": {
+      "email": "student@test.com",
+      "password": "student123",
+      "role": "student"
+    },
+    "parent": {
+      "email": "parent@test.com",
+      "password": "parent123",
+      "role": "parent"
+    }
+  },
+  
+  "testScenarios": {
+    "smoke": {
+      "description": "Quick smoke test to verify system works",
+      "command": "k6 run --vus 1 --iterations 5 load-test.js",
+      "duration": "~30 seconds"
+    },
+    "load": {
+      "description": "Normal expected load",
+      "command": "k6 run load-test.js",
+      "duration": "~5 minutes",
+      "expectedUsers": {
+        "admin": 20,
+        "teacher": 30,
+        "student": 100,
+        "parent": 50,
+        "public": 50
+      }
+    },
+    "stress": {
+      "description": "Stress test to find breaking point",
+      "command": "k6 run --vus 200 --duration 10m load-test.js",
+      "duration": "10 minutes",
+      "warning": "This will put heavy load on your server"
+    },
+    "spike": {
+      "description": "Spike test - sudden increase in load",
+      "command": "k6 run --vus 0 --max-vus 500 --duration 5m load-test.js",
+      "duration": "5 minutes"
+    }
+  },
+  
+  "priorityEndpoints": {
+    "high": [
+      "/api/auth/login",
+      "/api/auth/profile",
+      "/api/students/all",
+      "/api/attendance/summary",
+      "/api/payment/my-payments",
+      "/api/dashboard/analytics",
+      "/api/enhanced-analytics/comprehensive"
+    ],
+    "medium": [
+      "/api/teacher-attendance/admin/mark",
+      "/api/attendance/mark",
+      "/api/payment/create-order",
+      "/api/assignments/upload"
+    ],
+    "low": [
+      "/api/library/books",
+      "/api/timetable/generate",
+      "/api/exam-seating/generate"
+    ]
+  },
+  
+  "performanceTargets": {
+    "responseTime": {
+      "p95": "3000ms",
+      "p99": "5000ms",
+      "average": "1000ms"
+    },
+    "errorRate": {
+      "maximum": "5%"
+    },
+    "throughput": {
+      "minimum": "50 requests/second"
+    }
+  }
+}
+

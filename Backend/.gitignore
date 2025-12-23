@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Environment variables and secrets
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+.env.*
+
+# Google Cloud Service Account credentials
+school-calendar.json
+*-calendar.json
+*credentials*.json
+
+
