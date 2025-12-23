@@ -103,6 +103,24 @@ app.use('/api/auth/sms-2fa', sms2FARoutes);
 app.use('/api/auth/device-trust', deviceTrustRoutes);
 app.use('/api/exam-seating', examSeatingRoutes);
 
+// Root API check
+app.get("/api", (req, res) => {
+  res.json({
+    success: true,
+    message: "EduReach Backend API is running",
+    version: "1.0.0"
+  });
+});
+
+// Health check
+app.get("/health", (req, res) => {
+  res.json({
+    success: true,
+    message: "Server is running",
+    timestamp: new Date().toISOString()
+  });
+});
+
 
 // ✅ Start the server
 app.listen(PORT, "0.0.0.0", () => {
