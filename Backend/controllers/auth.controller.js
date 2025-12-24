@@ -51,17 +51,23 @@ const storeRefreshToken = async (userId, refreshToken) => {
 };
 
 const setCookies = (res, accessToken, refreshToken) => {
+	// For cross-origin requests (frontend on different domain than backend)
+	// Use 'none' with 'secure: true' to allow cookies in cross-origin requests
+	// Note: 'secure: true' with 'sameSite: none' is required for cross-origin cookies
+	// Even for localhost HTTP -> HTTPS, browsers allow this in modern versions
 	res.cookie("accessToken", accessToken, {
 		httpOnly: true, // prevent XSS attacks, cross site scripting attack
-		secure: process.env.NODE_ENV === "production",
-		sameSite: "strict", // prevents CSRF attack, cross-site request forgery attack
+		secure: true, // Required for sameSite: 'none' (works even with HTTP localhost -> HTTPS backend)
+		sameSite: "none", // Allow cookies in cross-origin requests
 		maxAge: 2 * 60 * 60 * 1000, // 2 hours (changed from 15 minutes)
+		path: "/", // Ensure cookie is available for all paths
 	});
 	res.cookie("refreshToken", refreshToken, {
 		httpOnly: true, // prevent XSS attacks, cross site scripting attack
-		secure: process.env.NODE_ENV === "production",
-		sameSite: "strict", // prevents CSRF attack, cross-site request forgery attack
+		secure: true, // Required for sameSite: 'none'
+		sameSite: "none", // Allow cookies in cross-origin requests
 		maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+		path: "/", // Ensure cookie is available for all paths
 	});
 };
 

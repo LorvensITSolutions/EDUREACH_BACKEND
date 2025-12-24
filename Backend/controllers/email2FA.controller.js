@@ -154,14 +154,15 @@ export const verifyEmail2FACode = async (req, res) => {
     // Set cookies
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      secure: true, // Required for sameSite: 'none'
+      sameSite: "none", // Allow cookies in cross-origin requests
       maxAge: 2 * 60 * 60 * 1000, // 2 hours
+      path: "/",
     });
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      secure: true, // Required for sameSite: 'none'
+      sameSite: "none", // Allow cookies in cross-origin requests
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
