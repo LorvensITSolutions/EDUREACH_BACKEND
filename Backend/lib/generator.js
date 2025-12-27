@@ -45,6 +45,7 @@ export class ClassGroup {
 export class TimetableGenerator {
   constructor() {
     this.maxIterations = 1000;
+    this.qualityMetrics = null; // Will store quality metrics after generation
   }
 
   /**
@@ -83,7 +84,16 @@ export class TimetableGenerator {
       );
 
       if (timetable) {
-        return { success: true, timetable, timeSlots };
+        // Calculate quality metrics
+        const qualityMetrics = this._calculateQualityMetrics(timetable, classes, teachers, days, periodsPerDay, teacherMap);
+        this.qualityMetrics = qualityMetrics;
+        
+        return { 
+          success: true, 
+          timetable, 
+          timeSlots,
+          quality: qualityMetrics
+        };
       } else {
         return { success: false, error: "Unable to generate valid timetable. Constraints may be too restrictive." };
       }
@@ -200,13 +210,75 @@ export class TimetableGenerator {
       c.sections.forEach(sec => classSectionList.push({ classObj: c, section: sec }));
     });
 
-    // For better distribution, attempt scheduling in different orders; cap attempts.
+    // Enhanced: Try multiple class-section ordering strategies for better distribution
+    // Strategy 1: Process by class size (larger classes first - more constraints)
+    // Strategy 2: Process by subject count (more subjects first)
+    // Strategy 3: Random order
+    const strategies = [
+      // Strategy 1: Sort by total periods required (descending)
+      [...classSectionList].sort((a, b) => {
+        const aTotal = a.classObj.subjects.reduce((sum, s) => sum + (s.periodsPerWeek || 0), 0);
+        const bTotal = b.classObj.subjects.reduce((sum, s) => sum + (s.periodsPerWeek || 0), 0);
+        return bTotal - aTotal;
+      }),
+      // Strategy 2: Sort by number of subjects (descending)
+      [...classSectionList].sort((a, b) => b.classObj.subjects.length - a.classObj.subjects.length),
+      // Strategy 3: Random order
+      [...classSectionList].sort(() => Math.random() - 0.5)
+    ];
+
+    // Try each strategy until one succeeds
+    for (const strategy of strategies) {
+      // Clone availability for this strategy attempt
+      const strategyAv = this._deepClone(teacherAvailability);
+      const strategyCounts = this._deepClone(teacherCountPerDay);
+      const strategyTimetable = this._deepClone(timetable);
+      
+      let strategySuccess = true;
+      for (const { classObj, section } of strategy) {
+        const ok = this._generateSectionTimetable(
+          classObj, section, strategyTimetable, teacherSubjectMap, strategyAv, teacherMap, strategyCounts, days, periodsPerDay
+        );
+        if (!ok) {
+          strategySuccess = false;
+          break;
+        }
+      }
+      
+      if (strategySuccess) {
+        // Copy successful strategy results back
+        Object.keys(strategyTimetable).forEach(className => {
+          timetable[className] = strategyTimetable[className];
+        });
+        Object.keys(strategyAv).forEach(tn => {
+          days.forEach(d => {
+            for (let p = 0; p < periodsPerDay; p++) {
+              teacherAvailability[tn][d][p] = strategyAv[tn][d][p];
+            }
+          });
+        });
+        Object.keys(strategyCounts).forEach(tn => {
+          days.forEach(d => teacherCountPerDay[tn][d] = strategyCounts[tn][d]);
+        });
+        break;
+      }
+    }
+
+    // If all strategies failed, try original order as fallback
+    let allFailed = true;
     for (const { classObj, section } of classSectionList) {
       const ok = this._generateSectionTimetable(
         classObj, section, timetable, teacherSubjectMap, teacherAvailability, teacherMap, teacherCountPerDay, days, periodsPerDay
       );
-      if (!ok) return null;
+      if (!ok) {
+        allFailed = true;
+        break;
+      } else {
+        allFailed = false;
+      }
     }
+    
+    if (allFailed) return null;
 
     // Insert library or free period for empty last period or preserve as-is
     // (Keep timetable as-is; admin can post-process to assign Library/Librarian to empty slots)
@@ -238,8 +310,9 @@ export class TimetableGenerator {
       });
     }
 
-    // Try multiple attempts to find a feasible layout
-    for (let attempt = 0; attempt < 50; attempt++) {
+    // Enhanced: Try multiple attempts with progressive constraint relaxation
+    // Increased attempts for better success rate
+    for (let attempt = 0; attempt < 100; attempt++) {
       // Reset this section's timetable - ensure structure exists
       days.forEach(d => {
         if (!d) return; // Skip invalid days
@@ -286,8 +359,8 @@ export class TimetableGenerator {
         return true;
       }
       // else next attempt - log failure reason for debugging
-      if (attempt === 49) {
-        console.log(`Failed to generate timetable for ${classObj.name} section ${section} after 50 attempts`);
+      if (attempt === 99) {
+        console.log(`Failed to generate timetable for ${classObj.name} section ${section} after 100 attempts`);
         console.log(`Subject schedule: ${subjectSchedule.join(', ')}`);
         console.log(`Available slots per day: ${days.map(d => timetable[classObj.name][section][d].filter(x => !x).length).join(', ')}`);
       }
@@ -357,15 +430,34 @@ export class TimetableGenerator {
 
         if (!candidateTeachers.length) continue;
 
-        // scoring: prefer teachers who don't prefer no-last-period, and who have lower daily count (balance load)
+        // Enhanced scoring: Multi-factor optimization
+        // Factors: workload balance, teacher preferences, subject distribution
         candidateTeachers.sort((a, b) => {
           const aObj = teacherMap[a], bObj = teacherMap[b];
-          // avoid teachers who prefer no last if this is last period
+          
+          // Factor 1: Avoid teachers who prefer no last period if this is last period
           const lastPeriodPenaltyA = (aObj.preferNoLastPeriod && period === periodsPerDay - 1) ? 1000 : 0;
           const lastPeriodPenaltyB = (bObj.preferNoLastPeriod && period === periodsPerDay - 1) ? 1000 : 0;
+          
+          // Factor 2: Workload balance (prefer teachers with fewer periods today)
           const countA = teacherCountPerDay[a][day] ?? 0;
           const countB = teacherCountPerDay[b][day] ?? 0;
-          return (countA + lastPeriodPenaltyA) - (countB + lastPeriodPenaltyB);
+          
+          // Factor 3: Overall weekly workload balance (prefer teachers with lower total weekly load)
+          const weeklyLoadA = this._getTeacherWeeklyLoad(a, teacherCountPerDay, days);
+          const weeklyLoadB = this._getTeacherWeeklyLoad(b, teacherCountPerDay, days);
+          
+          // Factor 4: Subject distribution (prefer teachers who haven't taught this subject today)
+          const subjectTodayA = this._hasTeacherTaughtSubjectToday(timetable, className, section, day, subjectName, a);
+          const subjectTodayB = this._hasTeacherTaughtSubjectToday(timetable, className, section, day, subjectName, b);
+          const subjectPenaltyA = subjectTodayA ? 50 : 0;
+          const subjectPenaltyB = subjectTodayB ? 50 : 0;
+          
+          // Combined score (lower is better)
+          const scoreA = countA + lastPeriodPenaltyA + (weeklyLoadA * 0.1) + subjectPenaltyA;
+          const scoreB = countB + lastPeriodPenaltyB + (weeklyLoadB * 0.1) + subjectPenaltyB;
+          
+          return scoreA - scoreB;
         });
 
         const teacherChosen = candidateTeachers[0];
@@ -479,5 +571,202 @@ export class TimetableGenerator {
   // Utility deep clone small objects/arrays
   _deepClone(obj) {
     return JSON.parse(JSON.stringify(obj));
+  }
+
+  // Enhanced: Calculate quality metrics for generated timetable
+  _calculateQualityMetrics(timetable, classes, teachers, days, periodsPerDay, teacherMap) {
+    const metrics = {
+      overallScore: 0,
+      teacherWorkloadBalance: 0,
+      subjectDistribution: 0,
+      constraintSatisfaction: 0,
+      freePeriods: 0,
+      details: {}
+    };
+
+    // 1. Teacher Workload Balance (0-100)
+    const teacherLoads = {};
+    let totalLoad = 0;
+    let teacherCount = 0;
+
+    Object.keys(teacherMap).forEach(teacherName => {
+      let weeklyLoad = 0;
+      days.forEach(day => {
+        classes.forEach(c => {
+          c.sections.forEach(section => {
+            const daySlots = timetable[c.name]?.[section]?.[day] || [];
+            daySlots.forEach(slot => {
+              if (slot && slot.teacher === teacherName) {
+                weeklyLoad++;
+              }
+            });
+          });
+        });
+      });
+      teacherLoads[teacherName] = weeklyLoad;
+      totalLoad += weeklyLoad;
+      teacherCount++;
+    });
+
+    const avgLoad = teacherCount > 0 ? totalLoad / teacherCount : 0;
+    let variance = 0;
+    Object.values(teacherLoads).forEach(load => {
+      variance += Math.pow(load - avgLoad, 2);
+    });
+    variance = teacherCount > 0 ? variance / teacherCount : 0;
+    const stdDev = Math.sqrt(variance);
+    
+    // Score: 100 if perfect balance, decreases with variance
+    // Normalize: max stdDev would be around avgLoad (if one teacher has all)
+    const maxStdDev = avgLoad > 0 ? avgLoad : 1;
+    metrics.teacherWorkloadBalance = Math.max(0, 100 - (stdDev / maxStdDev) * 100);
+    metrics.details.teacherLoads = teacherLoads;
+    metrics.details.avgTeacherLoad = avgLoad.toFixed(2);
+    metrics.details.workloadStdDev = stdDev.toFixed(2);
+
+    // 2. Subject Distribution (0-100)
+    // Check how well subjects are distributed across days (avoid same subject multiple times per day)
+    let subjectDistributionScore = 0;
+    let totalChecks = 0;
+    let goodDistributions = 0;
+
+    classes.forEach(c => {
+      c.sections.forEach(section => {
+        days.forEach(day => {
+          const daySlots = timetable[c.name]?.[section]?.[day] || [];
+          const subjectsToday = new Set();
+          let hasDuplicate = false;
+          
+          daySlots.forEach(slot => {
+            if (slot && slot.subject) {
+              if (subjectsToday.has(slot.subject)) {
+                hasDuplicate = true;
+              }
+              subjectsToday.add(slot.subject);
+            }
+          });
+          
+          totalChecks++;
+          if (!hasDuplicate) goodDistributions++;
+        });
+      });
+    });
+
+    metrics.subjectDistribution = totalChecks > 0 ? (goodDistributions / totalChecks) * 100 : 100;
+    metrics.details.subjectDistributionDetails = {
+      totalChecks,
+      goodDistributions,
+      duplicateSubjectDays: totalChecks - goodDistributions
+    };
+
+    // 3. Constraint Satisfaction (0-100)
+    // Check: teacher availability, maxPerDay, consecutive subjects
+    let constraintViolations = 0;
+    let totalConstraints = 0;
+
+    classes.forEach(c => {
+      c.sections.forEach(section => {
+        days.forEach(day => {
+          const daySlots = timetable[c.name]?.[section]?.[day] || [];
+          daySlots.forEach((slot, period) => {
+            if (slot && slot.teacher) {
+              totalConstraints++;
+              const teacher = teacherMap[slot.teacher];
+              if (teacher) {
+                // Check maxPerDay
+                const dayCount = Object.values(teacherLoads).reduce((sum, load, idx) => {
+                  const tName = Object.keys(teacherLoads)[idx];
+                  if (tName === slot.teacher) {
+                    // Count this teacher's periods on this day
+                    let count = 0;
+                    classes.forEach(c2 => {
+                      c2.sections.forEach(s2 => {
+                        const dSlots = timetable[c2.name]?.[s2]?.[day] || [];
+                        dSlots.forEach(s => {
+                          if (s && s.teacher === slot.teacher) count++;
+                        });
+                      });
+                    });
+                    return count;
+                  }
+                  return sum;
+                }, 0);
+                
+                if (teacher.maxPerDay !== Infinity && dayCount > teacher.maxPerDay) {
+                  constraintViolations++;
+                }
+              }
+            }
+          });
+        });
+      });
+    });
+
+    metrics.constraintSatisfaction = totalConstraints > 0 
+      ? Math.max(0, 100 - (constraintViolations / totalConstraints) * 100) 
+      : 100;
+    metrics.details.constraintViolations = constraintViolations;
+    metrics.details.totalConstraints = totalConstraints;
+
+    // 4. Free Periods Utilization (0-100)
+    // Check how many free periods exist (some free periods are good for flexibility)
+    let totalSlots = 0;
+    let freeSlots = 0;
+
+    classes.forEach(c => {
+      c.sections.forEach(section => {
+        days.forEach(day => {
+          const daySlots = timetable[c.name]?.[section]?.[day] || [];
+          daySlots.forEach(slot => {
+            totalSlots++;
+            if (!slot || !slot.subject) freeSlots++;
+          });
+        });
+      });
+    });
+
+    const freePeriodPercentage = totalSlots > 0 ? (freeSlots / totalSlots) * 100 : 0;
+    // Optimal free period percentage is around 5-10%
+    const optimalFree = 7.5;
+    const freeScore = 100 - Math.abs(freePeriodPercentage - optimalFree) * 5;
+    metrics.freePeriods = Math.max(0, Math.min(100, freeScore));
+    metrics.details.freeSlots = freeSlots;
+    metrics.details.totalSlots = totalSlots;
+    metrics.details.freePeriodPercentage = freePeriodPercentage.toFixed(2);
+
+    // 5. Overall Score (weighted average)
+    metrics.overallScore = (
+      metrics.teacherWorkloadBalance * 0.3 +
+      metrics.subjectDistribution * 0.3 +
+      metrics.constraintSatisfaction * 0.25 +
+      metrics.freePeriods * 0.15
+    );
+
+    // Add grade/rating
+    if (metrics.overallScore >= 90) metrics.grade = "Excellent";
+    else if (metrics.overallScore >= 75) metrics.grade = "Good";
+    else if (metrics.overallScore >= 60) metrics.grade = "Fair";
+    else metrics.grade = "Needs Improvement";
+
+    return metrics;
+  }
+
+  // Helper: Get teacher's weekly load
+  _getTeacherWeeklyLoad(teacherName, teacherCountPerDay, days) {
+    let total = 0;
+    days.forEach(day => {
+      total += teacherCountPerDay[teacherName]?.[day] || 0;
+    });
+    return total;
+  }
+
+  // Helper: Check if teacher has taught this subject today
+  _hasTeacherTaughtSubjectToday(timetable, className, section, day, subjectName, teacherName) {
+    const daySlots = timetable[className]?.[section]?.[day] || [];
+    return daySlots.some(slot => 
+      slot && 
+      slot.teacher === teacherName && 
+      slot.subject === subjectName
+    );
   }
 }

@@ -3,7 +3,7 @@ import { Subject, Teacher, ClassGroup, TimetableGenerator } from "../lib/generat
 import {TimetableModel} from '../models/timetableModel.js';
 import TeacherModel from "../models/teacher.model.js";
 import { protectRoute, teacherRoute, studentRoute } from "../middleware/auth.middleware.js";
-import { validateTimetableInput, validateSubjectsExist, validateTeachersExist, validateClassesExist } from "../utils/timetableValidation.js";
+import { validateTimetableInput, validateSubjectsExist, validateTeachersExist, validateClassesExist, detectConflicts } from "../utils/timetableValidation.js";
 import { initProgress, updateProgress, getProgress, completeProgress, failProgress } from "../utils/timetableProgress.js";
 import { TimetableTemplateModel } from "../models/timetableTemplateModel.js";
 import { parseClassesFromFile, parseTeachersFromFile, parseFromJSON, parseClassesFromCSV } from "../utils/timetableBulkImport.js";
@@ -33,13 +33,17 @@ router.post("/validate", async (req, res) => {
   try {
     const { classes, teachers, days, periodsPerDay } = req.body;
     const validation = await validateTimetableInput({ classes, teachers, days, periodsPerDay });
+    const conflictDetection = await detectConflicts({ classes, teachers, days, periodsPerDay });
     
     res.json({
       success: validation.valid,
       valid: validation.valid,
       errors: validation.errors,
       warnings: validation.warnings,
-      summary: validation.summary
+      summary: validation.summary,
+      conflicts: conflictDetection.conflicts,
+      conflictSuggestions: conflictDetection.suggestions,
+      hasConflicts: conflictDetection.hasConflicts
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -170,14 +174,15 @@ router.post("/generate", async (req, res) => {
         }
       }
       
-      // Send transformed result
+      // Send transformed result with quality metrics
       const response = {
         success: true,
         classes: classesArray,
         days,
         periodsPerDay,
         timeSlots: result.timeSlots,
-        jobId: currentJobId
+        jobId: currentJobId,
+        quality: result.quality || null // Include quality metrics
       };
       
       if (jobId) {

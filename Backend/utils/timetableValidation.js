@@ -397,3 +397,107 @@ export async function validateClassesExist(classNames) {
   };
 }
 
+/**
+ * Detect potential conflicts before generation
+ * @param {Object} input - { classes, teachers, days, periodsPerDay }
+ * @returns {Object} { hasConflicts: boolean, conflicts: Array, suggestions: Array }
+ */
+export async function detectConflicts(input) {
+  const { classes, teachers, days, periodsPerDay } = input;
+  const conflicts = [];
+  const suggestions = [];
+
+  // 1. Check for teacher overload
+  const teacherWorkload = {};
+  classes.forEach(cls => {
+    cls.subjects.forEach(subject => {
+      const periods = Number(subject.periodsPerWeek) || 0;
+      teachers.forEach(teacher => {
+        if (teacher.subjects && teacher.subjects.includes(subject.name)) {
+          if (!teacherWorkload[teacher.name]) {
+            teacherWorkload[teacher.name] = 0;
+          }
+          teacherWorkload[teacher.name] += periods;
+        }
+      });
+    });
+  });
+
+  const maxPossible = days.length * periodsPerDay;
+  Object.entries(teacherWorkload).forEach(([teacherName, workload]) => {
+    if (workload > maxPossible) {
+      conflicts.push({
+        type: "TEACHER_OVERLOAD",
+        teacher: teacherName,
+        workload,
+        maxPossible,
+        severity: "high"
+      });
+      suggestions.push({
+        type: "REDISTRIBUTE_SUBJECTS",
+        message: `Redistribute ${teacherName}'s subjects to other teachers or reduce periods per week`,
+        teacher: teacherName
+      });
+    }
+  });
+
+  // 2. Check for subject-teacher mismatches
+  const allSubjects = new Set();
+  classes.forEach(cls => {
+    cls.subjects.forEach(subject => allSubjects.add(subject.name));
+  });
+
+  const teacherSubjects = new Set();
+  teachers.forEach(teacher => {
+    if (teacher.subjects) {
+      teacher.subjects.forEach(sub => teacherSubjects.add(sub));
+    }
+  });
+
+  const missingTeachers = [...allSubjects].filter(s => !teacherSubjects.has(s));
+  if (missingTeachers.length > 0) {
+    conflicts.push({
+      type: "MISSING_TEACHERS",
+      subjects: missingTeachers,
+      severity: "critical"
+    });
+    suggestions.push({
+      type: "ASSIGN_TEACHERS",
+      message: `Assign teachers for subjects: ${missingTeachers.join(", ")}`,
+      subjects: missingTeachers
+    });
+  }
+
+  // 3. Check for insufficient slots
+  classes.forEach(cls => {
+    const totalPeriodsRequired = cls.subjects.reduce((sum, s) => sum + (s.periodsPerWeek || 0), 0);
+    const totalSlotsAvailable = days.length * periodsPerDay;
+    if (totalPeriodsRequired > totalSlotsAvailable) {
+      conflicts.push({
+        type: "INSUFFICIENT_SLOTS",
+        class: cls.name,
+        required: totalPeriodsRequired,
+        available: totalSlotsAvailable,
+        severity: "high"
+      });
+      suggestions.push({
+        type: "REDUCE_PERIODS",
+        message: `Reduce periods per week for class ${cls.name} or increase days/periods per day`,
+        class: cls.name,
+        reduction: totalPeriodsRequired - totalSlotsAvailable
+      });
+    }
+  });
+
+  return {
+    hasConflicts: conflicts.length > 0,
+    conflicts,
+    suggestions,
+    summary: {
+      totalConflicts: conflicts.length,
+      critical: conflicts.filter(c => c.severity === "critical").length,
+      high: conflicts.filter(c => c.severity === "high").length,
+      medium: conflicts.filter(c => c.severity === "medium").length
+    }
+  };
+}
