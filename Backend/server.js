@@ -38,6 +38,7 @@ import email2FARoutes from "./routes/email2FA.route.js";
 import sms2FARoutes from "./routes/sms2FA.route.js";
 import deviceTrustRoutes from "./routes/deviceTrust.route.js";
 import examSeatingRoutes from "./routes/examSeatingRoutes.js";
+import promotionRoutes from "./routes/promotion.route.js";
 
 
 dotenv.config();
@@ -125,6 +126,7 @@ app.use('/api/auth/email-2fa', email2FARoutes);
 app.use('/api/auth/sms-2fa', sms2FARoutes);
 app.use('/api/auth/device-trust', deviceTrustRoutes);
 app.use('/api/exam-seating', examSeatingRoutes);
+app.use('/api/promotion', promotionRoutes);
 
 // Root API check
 app.get("/api", (req, res) => {

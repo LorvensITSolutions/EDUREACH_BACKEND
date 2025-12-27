@@ -7,6 +7,7 @@ import Teacher from "../models/teacher.model.js";
 import Attendance from "../models/attendance.model.js";
 import TeacherAttendance from "../models/TeacherAttendance.js";
 import { getAcademicYear } from "../config/appConfig.js";
+import { getCurrentAcademicYear, isValidAcademicYear } from "../utils/academicYear.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
 
 // 🔧 Utility – always build day range in UTC to avoid timezone drift
@@ -63,7 +64,18 @@ export const invalidateAnalyticsCache = async (type = 'all', academicYear = '') 
 // 📊 COMPREHENSIVE DASHBOARD ANALYTICS
 export const getComprehensiveDashboardAnalytics = async (req, res) => {
   try {
-    const academicYear = getAcademicYear();
+    // Get academic year from query parameter, or use current academic year as default
+    const requestedAcademicYear = req.query.academicYear;
+    const academicYear = (requestedAcademicYear && isValidAcademicYear(requestedAcademicYear)) 
+      ? requestedAcademicYear 
+      : getCurrentAcademicYear();
+    
+    console.log("📊 Dashboard Analytics - Academic Year:", {
+      requested: requestedAcademicYear,
+      using: academicYear,
+      isValid: requestedAcademicYear ? isValidAcademicYear(requestedAcademicYear) : 'N/A'
+    });
+    
     const { date } = req.query; // Get date from query parameter
     
     // Use provided date or default to today
@@ -492,7 +504,11 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
 // 📊 REAL-TIME UPDATES
 export const getRealTimeDashboardUpdates = async (req, res) => {
   try {
-    const academicYear = getAcademicYear();
+    // Get academic year from query parameter, or use current academic year as default
+    const requestedAcademicYear = req.query.academicYear;
+    const academicYear = (requestedAcademicYear && isValidAcademicYear(requestedAcademicYear)) 
+      ? requestedAcademicYear 
+      : getCurrentAcademicYear();
     const { date } = req.query; // Get date from query parameter
     
     // Use provided date or default to today
@@ -751,7 +767,11 @@ export const getRealTimeAlerts = async (req, res) => {
 export const getFeeCollectionStatusData = async (req, res) => {
   try {
     const { days = 10, class: filterClass, section: filterSection } = req.query;
-    const academicYear = getAcademicYear();
+    // Get academic year from query parameter, or use current academic year as default
+    const requestedAcademicYear = req.query.academicYear;
+    const academicYear = (requestedAcademicYear && isValidAcademicYear(requestedAcademicYear)) 
+      ? requestedAcademicYear 
+      : getCurrentAcademicYear();
     const endDate = new Date();
     const startDate = new Date(endDate.getTime() - (days * 24 * 60 * 60 * 1000));
 
@@ -1059,7 +1079,11 @@ export const getFeeCollectionStatusData = async (req, res) => {
 // Get payment methods analysis data
 export const getPaymentMethodsData = async (req, res) => {
   try {
-    const academicYear = getAcademicYear();
+    // Get academic year from query parameter, or use current academic year as default
+    const requestedAcademicYear = req.query.academicYear;
+    const academicYear = (requestedAcademicYear && isValidAcademicYear(requestedAcademicYear)) 
+      ? requestedAcademicYear 
+      : getCurrentAcademicYear();
     
     // Generate cache key for payment methods data
     const cacheKey = cacheKeys.analytics.paymentMethods(academicYear);
@@ -1201,7 +1225,11 @@ export const getPaymentMethodsData = async (req, res) => {
 export const getIncomeExpenseData = async (req, res) => {
   try {
     const { days = 10 } = req.query;
-    const academicYear = getAcademicYear();
+    // Get academic year from query parameter, or use current academic year as default
+    const requestedAcademicYear = req.query.academicYear;
+    const academicYear = (requestedAcademicYear && isValidAcademicYear(requestedAcademicYear)) 
+      ? requestedAcademicYear 
+      : getCurrentAcademicYear();
     const endDate = new Date();
     const startDate = new Date(endDate.getTime() - (days * 24 * 60 * 60 * 1000));
 
@@ -1438,7 +1466,11 @@ export const getAttendanceInspectionData = async (req, res) => {
 // 📊 ANNUAL FEE SUMMARY
 export const getAnnualFeeSummary = async (req, res) => {
   try {
-    const academicYear = getAcademicYear();
+    // Get academic year from query parameter, or use current academic year as default
+    const requestedAcademicYear = req.query.academicYear;
+    const academicYear = (requestedAcademicYear && isValidAcademicYear(requestedAcademicYear)) 
+      ? requestedAcademicYear 
+      : getCurrentAcademicYear();
     
     const feeSummary = await FeePayment.aggregate([
       {

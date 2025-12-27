@@ -83,7 +83,7 @@ pm2 delete edureach-backend
 cd /var/www/EDUREACH_BACKEND/Backend
 pm2 start server.js --name edureach-backend --update-env
 
-# Check logs immediately
+# Check logs immediately 
 pm2 logs edureach-backend --lines 30
 ```
 

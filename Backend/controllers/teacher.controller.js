@@ -4,6 +4,7 @@ import Student from "../models/student.model.js";
 import Parent from "../models/parent.model.js";
 import Attendance from "../models/attendance.model.js";
 import FeePayment from "../models/feePayment.model.js";
+import TeacherAttendance from "../models/TeacherAttendance.js";
 import { generateTeacherId, generateTeacherCredentials } from "../utils/credentialGenerator.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
 import { validateTeacherAssignment, validateTeacherData, checkDuplicateAssignment } from "../utils/teacherValidation.js";
@@ -820,28 +821,60 @@ export const getTeacherProfileForAdmin = async (req, res) => {
       return res.status(404).json({ message: "Teacher not found" });
     }
 
-    // Calculate attendance statistics for students taught by this teacher
+    // Calculate attendance statistics for this teacher (teacher's own attendance)
     const currentDate = new Date();
     const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
-    const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+    const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0, 23, 59, 59, 999);
 
-    // Get students assigned to this teacher
-    const students = await Student.find({
-      sectionAssignments: {
-        $elemMatch: {
-          className: { $in: teacher.sectionAssignments.map(s => s.className) },
-          section: { $in: teacher.sectionAssignments.map(s => s.section) }
-        }
-      }
-    }).select('_id');
-
-    const studentIds = students.map(s => s._id);
-
-    // Calculate attendance statistics for students taught by this teacher
-    const attendanceRecords = await Attendance.find({
-      student: { $in: studentIds },
-      date: { $gte: startOfMonth, $lte: endOfMonth }
+    console.log("📊 Fetching teacher attendance for:", {
+      teacherId,
+      teacherName: teacher.name,
+      startOfMonth: startOfMonth.toISOString(),
+      endOfMonth: endOfMonth.toISOString()
     });
+
+    // Get teacher's own attendance records for the current month
+    // Try multiple query strategies to find records
+    let attendanceRecords = [];
+    
+    // Strategy 1: Query with ObjectId and isActive filter
+    attendanceRecords = await TeacherAttendance.find({
+      teacher: teacherId,
+      date: { $gte: startOfMonth, $lte: endOfMonth },
+      isActive: { $ne: false }
+    }).lean();
+
+    // Strategy 2: If no records, try without isActive filter
+    if (attendanceRecords.length === 0) {
+      console.log("📊 No records with isActive filter, trying without filter...");
+      attendanceRecords = await TeacherAttendance.find({
+        teacher: teacherId,
+        date: { $gte: startOfMonth, $lte: endOfMonth }
+      }).lean();
+    }
+
+    // Strategy 3: If still no records, try with teacherId string field
+    if (attendanceRecords.length === 0 && teacher.teacherId) {
+      console.log("📊 No records with teacher ObjectId, trying with teacherId string:", teacher.teacherId);
+      attendanceRecords = await TeacherAttendance.find({
+        teacherId: teacher.teacherId,
+        date: { $gte: startOfMonth, $lte: endOfMonth }
+      }).lean();
+    }
+
+    // Strategy 4: Check if there are ANY records for this teacher (for debugging)
+    const allTeacherRecords = await TeacherAttendance.find({
+      $or: [
+        { teacher: teacherId },
+        { teacherId: teacher.teacherId }
+      ]
+    }).limit(1).lean();
+    
+    console.log("📊 Found attendance records for current month:", attendanceRecords.length);
+    console.log("📊 Total records for this teacher (any date):", allTeacherRecords.length);
+    if (attendanceRecords.length > 0) {
+      console.log("📊 Sample record:", JSON.stringify(attendanceRecords[0], null, 2));
+    }
 
     const attendanceStats = {
       present: attendanceRecords.filter(record => record.status === 'present').length,
@@ -854,23 +887,81 @@ export const getTeacherProfileForAdmin = async (req, res) => {
       ? Math.round((attendanceStats.present / attendanceStats.total) * 100)
       : 0;
 
-    // Get recent attendance records (last 10)
-    const recentAttendance = await Attendance.find({
-      student: { $in: studentIds }
+    // Get recent teacher attendance records (last 10)
+    // Try multiple query strategies
+    let recentAttendance = [];
+    
+    // Strategy 1: Query with ObjectId and isActive filter
+    recentAttendance = await TeacherAttendance.find({
+      teacher: teacherId,
+      isActive: { $ne: false }
     })
-    .populate('student', 'name class section')
     .sort({ date: -1 })
     .limit(10)
-    .select('date status reason student');
+    .select('date status reason teacherName teacherId subject')
+    .lean();
 
-    // Prepare comprehensive teacher data
+    // Strategy 2: If no records, try without isActive filter
+    if (recentAttendance.length === 0) {
+      console.log("📊 No recent records with isActive filter, trying without filter...");
+      recentAttendance = await TeacherAttendance.find({
+        teacher: teacherId
+      })
+      .sort({ date: -1 })
+      .limit(10)
+      .select('date status reason teacherName teacherId subject')
+      .lean();
+    }
+
+    // Strategy 3: If still no records, try with teacherId string field
+    if (recentAttendance.length === 0 && teacher.teacherId) {
+      console.log("📊 No recent records with teacher ObjectId, trying with teacherId string:", teacher.teacherId);
+      recentAttendance = await TeacherAttendance.find({
+        teacherId: teacher.teacherId
+      })
+      .sort({ date: -1 })
+      .limit(10)
+      .select('date status reason teacherName teacherId subject')
+      .lean();
+    }
+
+    console.log("📊 Recent attendance records:", recentAttendance.length);
+    if (recentAttendance.length > 0) {
+      console.log("📊 Sample recent record:", JSON.stringify(recentAttendance[0], null, 2));
+    }
+
+    // Get students count for this teacher (for display purposes)
+    const students = await Student.find({
+      $or: teacher.sectionAssignments.map(assignment => ({
+        class: assignment.className,
+        section: assignment.section
+      }))
+    }).select('_id');
+    
+    const studentsCount = students.length;
+
+    // Prepare comprehensive teacher data with teacher attendance
     const teacherData = {
       ...teacher.toObject(),
-      attendanceStats,
-      attendancePercentage,
-      recentAttendance,
-      studentsCount: studentIds.length
+      attendanceStats: attendanceStats || { present: 0, absent: 0, total: 0 },
+      attendancePercentage: attendancePercentage || 0,
+      recentAttendance: recentAttendance.map(record => ({
+        date: record.date,
+        status: record.status,
+        reason: record.reason || "",
+        teacherName: record.teacherName || teacher.name,
+        teacherId: record.teacherId || teacher.teacherId,
+        subject: record.subject || teacher.subject || "N/A"
+      })) || [],
+      studentsCount: studentsCount || 0
     };
+
+    console.log("📊 Returning teacher data with attendance:", {
+      attendanceStats: teacherData.attendanceStats,
+      attendancePercentage: teacherData.attendancePercentage,
+      recentAttendanceCount: teacherData.recentAttendance.length,
+      studentsCount: teacherData.studentsCount
+    });
 
     res.status(200).json(teacherData);
   } catch (error) {

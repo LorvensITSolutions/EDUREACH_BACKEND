@@ -137,7 +137,7 @@ export const login = async (req, res) => {
 		if (isEmail) {
 			// Traditional email login for teachers and admins
 			console.log("Email login attempt:", email);
-			user = await User.findOne({ email }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone");
+			user = await User.findOne({ email }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone +mustChangePassword");
 		} else {
 			// ID-based login for students and parents
 			console.log("ID-based login attempt:", email);
@@ -148,7 +148,7 @@ export const login = async (req, res) => {
 				const Student = (await import('../models/student.model.js')).default;
 				const student = await Student.findOne({ studentId: email });
 				if (student) {
-					user = await User.findOne({ studentId: student._id }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone");
+					user = await User.findOne({ studentId: student._id }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone +mustChangePassword");
 				}
 			} else if (email.startsWith('T')) {
 				// This is likely a teacher ID
@@ -158,7 +158,7 @@ export const login = async (req, res) => {
 				console.log('Teacher found by ID:', teacher ? { id: teacher._id, teacherId: teacher.teacherId } : 'No teacher found');
 				
 				if (teacher) {
-					user = await User.findOne({ teacherId: teacher._id }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone");
+					user = await User.findOne({ teacherId: teacher._id }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone +mustChangePassword");
 					console.log('User found for teacher:', user ? { id: user._id, role: user.role } : 'No user found');
 				}
 			} else if (email.startsWith('P')) {
@@ -193,7 +193,7 @@ export const login = async (req, res) => {
 				}
 				
 				if (parent) {
-					user = await User.findOne({ parentId: parent._id }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone");
+					user = await User.findOne({ parentId: parent._id }).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone +mustChangePassword");
 					console.log('User found for parent:', user ? { id: user._id, role: user.role } : 'No user found');
 				}
 			}
@@ -205,7 +205,7 @@ export const login = async (req, res) => {
 						{ email: email },
 						{ email: `${email}@school.local` }
 					]
-				}).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone");
+				}).select("+password +role +twoFactorEnabled +twoFactorVerified +email2FAEnabled +email +sms2FAEnabled +phone +mustChangePassword");
 			}
 		}
 
@@ -216,7 +216,14 @@ export const login = async (req, res) => {
 			
 			// Check for trusted device first
 			const deviceToken = req.headers["device-token"] || req.cookies?.deviceToken || req.body?.deviceToken;
-			const deviceInfo = req.body?.deviceInfo || {};
+			// Support both nested deviceInfo format and direct properties for backward compatibility
+			const deviceInfo = req.body?.deviceInfo || {
+				screenResolution: req.body?.screenResolution,
+				timezone: req.body?.timezone,
+				userAgent: req.body?.userAgent,
+				platform: req.body?.platform,
+				deviceType: req.body?.deviceType,
+			};
 			let isDeviceTrusted = false;
 			
 			// Debug: Log cookie information
@@ -329,17 +336,24 @@ export const login = async (req, res) => {
 				await storeRefreshToken(user._id, refreshToken);
 				setCookies(res, accessToken, refreshToken);
 
-				return res.json({
+				// Only include mustChangePassword if it's explicitly true
+				const response = {
 					_id: user._id,
 					name: user.name,
 					email: user.email,
 					role: user.role,
-					mustChangePassword: user.mustChangePassword,
 					requires2FA: false,
 					requiresEmail2FA: false,
 					requiresSMS2FA: false,
 					deviceTrusted: true,
-				});
+				};
+				
+				// Only add mustChangePassword if it's true (explicitly check for true)
+				if (user.mustChangePassword === true) {
+					response.mustChangePassword = true;
+				}
+
+				return res.json(response);
 			}
 			
 			// Check if TOTP 2FA is enabled (takes highest priority)
@@ -469,16 +483,23 @@ export const login = async (req, res) => {
 			await storeRefreshToken(user._id, refreshToken);
 			setCookies(res, accessToken, refreshToken);
 
-			res.json({
+			// Only include mustChangePassword if it's explicitly true
+			const response = {
 				_id: user._id,
 				name: user.name,
 				email: user.email,
 				role: user.role,
-				mustChangePassword: user.mustChangePassword, // 🔐 Frontend will handle redirect
 				requires2FA: false,
 				requiresEmail2FA: false,
 				requiresSMS2FA: false,
-			});
+			};
+			
+			// Only add mustChangePassword if it's true (explicitly check for true)
+			if (user.mustChangePassword === true) {
+				response.mustChangePassword = true;
+			}
+
+			res.json(response);
 		} else {
 			console.log("Login failed - invalid credentials");
 			res.status(400).json({ message: "Invalid username/email or password" });

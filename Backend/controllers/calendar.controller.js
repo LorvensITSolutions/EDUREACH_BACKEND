@@ -275,10 +275,12 @@ export const listEvents = async (req, res) => {
 
     // Optionally: allow fetching all events, not just future
     const timeMin = req.query.all === "true" ? undefined : new Date().toISOString();
+    // Increase maxResults to fetch more events, or set to 2500 (Google Calendar API max)
+    const maxResults = req.query.all === "true" ? 2500 : 20;
     const response = await calendar.events.list({
       calendarId: CALENDAR_ID,
       timeMin,
-      maxResults: 20,
+      maxResults,
       singleEvents: true,
       orderBy: "startTime",
     });
