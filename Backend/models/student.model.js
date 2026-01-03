@@ -57,12 +57,16 @@ const studentSchema = new mongoose.Schema({
     toSection: { type: String },
     promotionType: { 
       type: String, 
-      enum: ['promoted', 'hold-back', 'transferred'] 
+      enum: ['promoted', 'hold-back', 'transferred', 'reverted'] 
     },
     reason: { type: String },
     attendancePercentage: { type: Number },
     promotedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    promotedAt: { type: Date, default: Date.now }
+    promotedAt: { type: Date, default: Date.now },
+    reverted: { type: Boolean, default: false },
+    revertedAt: { type: Date },
+    revertedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    revertReason: { type: String }
   }],
   transferCertificate: {
     issued: { type: Boolean, default: false },

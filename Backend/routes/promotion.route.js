@@ -6,7 +6,8 @@ import {
   getPromotionHistory,
   bulkPromoteByClass,
   getStudentAttendanceForYear,
-  updateAllStudentsAcademicYear
+  updateAllStudentsAcademicYear,
+  revertPromotion
 } from "../controllers/promotion.controller.js";
 import { protectRoute, adminRoute } from "../middleware/auth.middleware.js";
 
@@ -65,6 +66,14 @@ router.get(
   "/history/:studentId",
   protectRoute,
   getPromotionHistory
+);
+
+// Revert/Undo a promotion
+router.post(
+  "/revert",
+  protectRoute,
+  adminRoute,
+  revertPromotion
 );
 
 export default router;

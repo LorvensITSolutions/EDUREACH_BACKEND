@@ -7,7 +7,7 @@ import Teacher from "../models/teacher.model.js";
 import Attendance from "../models/attendance.model.js";
 import TeacherAttendance from "../models/TeacherAttendance.js";
 import { getAcademicYear } from "../config/appConfig.js";
-import { getCurrentAcademicYear, isValidAcademicYear } from "../utils/academicYear.js";
+import { getCurrentAcademicYear, isValidAcademicYear, getPreviousAcademicYear, getNextAcademicYear } from "../utils/academicYear.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
 
 // 🔧 Utility – always build day range in UTC to avoid timezone drift
@@ -287,16 +287,138 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
       ? Math.round(((totalStudents - lastYearStudents) / lastYearStudents) * 100)
       : 0;
 
-    // 📊 CHART DATA
-    const studentsByClass = await Student.aggregate([
-      {
-        $group: {
-          _id: "$class",
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
+    // 📊 CHART DATA - Academic Year Aware Students By Class
+    // Helper function to determine which class a student should appear in for the selected academic year
+    const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
+      const promotionHistory = student.promotionHistory || [];
+      
+      // Check if there's a revert record for this academic year (takes precedence)
+      const revertRecord = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      // Check if student was promoted IN this academic year (and not reverted)
+      const promotionInThisYear = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      if (revertRecord) {
+        // Student's promotion was reverted - show them in the class they were reverted to
+        return revertRecord.toClass;
+      }
+      
+      if (promotionInThisYear) {
+        // Student was promoted in this year (and not reverted) - show them in their OLD class (fromClass)
+        return promotionInThisYear.fromClass;
+      }
+      
+      // Check if student was promoted in the PREVIOUS academic year (affects this year)
+      const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+      const promotionInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      const revertInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      if (revertInPreviousYear) {
+        // Promotion was reverted in previous year - show them in the class they were reverted to
+        return revertInPreviousYear.toClass;
+      }
+      
+      if (promotionInPreviousYear) {
+        // Student was promoted in previous year (and not reverted) - show them in their NEW class (toClass) for this year
+        return promotionInPreviousYear.toClass;
+      }
+      
+      // No promotion affecting this year - use current class
+      return student.class;
+    };
+
+    // Check if viewing future academic year (only show students with promotion/hold-back records)
+    const currentAcadYear = getCurrentAcademicYear();
+    // Compare academic years by extracting start year
+    const currentStartYear = parseInt(currentAcadYear.split('-')[0]);
+    const selectedStartYear = parseInt(academicYear.split('-')[0]);
+    const isFutureAcademicYear = selectedStartYear > currentStartYear;
+    
+    console.log(`📊 StudentsByClass - Academic Year: ${academicYear}, Current: ${currentAcadYear}, Is Future: ${isFutureAcademicYear}`);
+    
+    // Fetch all students
+    const allStudents = await Student.find({}).lean();
+    console.log(`📊 Total students in database: ${allStudents.length}`);
+    
+    // Process students and determine their display class for the selected academic year
+    const studentsWithDisplayClass = allStudents.map(student => {
+      const displayClass = getStudentClassForAcademicYear(student, academicYear);
+      const promotionHistory = student.promotionHistory || [];
+      
+      // Check if student has any promotion/hold-back record for the previous academic year
+      // (which would affect their class in the selected academic year)
+      const previousAcademicYear = getPreviousAcademicYear(academicYear);
+      const hasRecordForPreviousYear = promotionHistory.some(
+        p => p.academicYear === previousAcademicYear && 
+             (p.promotionType === 'promoted' || p.promotionType === 'hold-back') &&
+             !p.reverted
+      );
+      
+      // Check if student has a promotion/hold-back record directly in the selected academic year
+      const hasRecordForSelectedYear = promotionHistory.some(
+        p => p.academicYear === academicYear && 
+             (p.promotionType === 'promoted' || p.promotionType === 'hold-back') &&
+             !p.reverted
+      );
+      
+      return {
+        student,
+        displayClass,
+        hasRecordForPreviousYear,
+        hasRecordForSelectedYear
+      };
+    });
+    
+    // If viewing future academic year, ONLY show students who have promotion/hold-back records
+    let filteredStudents = studentsWithDisplayClass;
+    if (isFutureAcademicYear) {
+      filteredStudents = studentsWithDisplayClass.filter(item => {
+        // For future years, student must have a promotion/hold-back record in the previous year
+        // OR a promotion/hold-back record in the selected year itself
+        return item.hasRecordForPreviousYear || item.hasRecordForSelectedYear;
+      });
+      console.log(`📊 Filtered to ${filteredStudents.length} students with promotion records for future academic year ${academicYear} (from ${allStudents.length} total students)`);
+    } else {
+      // For current or past academic years, show all students
+      console.log(`📊 Showing all ${filteredStudents.length} students for academic year ${academicYear}`);
+    }
+    
+    // Group by display class
+    const studentsByClassMap = new Map();
+    filteredStudents.forEach(({ displayClass }) => {
+      const count = studentsByClassMap.get(displayClass) || 0;
+      studentsByClassMap.set(displayClass, count + 1);
+    });
+    
+    // Convert to array format
+    const studentsByClass = Array.from(studentsByClassMap.entries())
+      .map(([_id, count]) => ({ _id, count }))
+      .sort((a, b) => {
+        // Sort: Nursery, LKG, then numeric classes
+        const classOrder = { 'Nursery': 1, 'LKG': 2, 'UKG': 3 };
+        const aOrder = classOrder[a._id];
+        const bOrder = classOrder[b._id];
+        if (aOrder !== undefined && bOrder !== undefined) return aOrder - bOrder;
+        if (aOrder !== undefined) return -1;
+        if (bOrder !== undefined) return 1;
+        const aNum = parseInt(a._id);
+        const bNum = parseInt(b._id);
+        if (!isNaN(aNum) && !isNaN(bNum)) return aNum - bNum;
+        return String(a._id).localeCompare(String(b._id));
+      });
 
     // Validate studentsByClass data
     const validatedStudentsByClass = Array.isArray(studentsByClass) ? studentsByClass : [];

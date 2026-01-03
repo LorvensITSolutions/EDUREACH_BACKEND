@@ -13,6 +13,15 @@ const announcementSchema = new mongoose.Schema({
     enum: ['high', 'medium', 'low'],
     default: 'medium'
   },
+  recipientType: {
+    type: String,
+    enum: ['students', 'teachers', 'all'],
+    default: 'students'
+  },
+  targetClasses: {
+    type: [String],
+    default: [] // Empty array means all classes
+  },
   pinned: { type: Boolean, default: false },
   date: { type: Date, default: Date.now },
   whatsappStats: {

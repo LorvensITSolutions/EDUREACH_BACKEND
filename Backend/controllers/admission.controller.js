@@ -3,6 +3,7 @@ import cloudinary from '../lib/cloudinary.js';
 import { redis } from '../lib/redis.js';
 import { sendEmail } from '../utils/emailService.js';
 import { sendWhatsApp } from '../utils/sendWhatsApp.js';
+import xlsx from 'xlsx';
 
 export const createApplication = async (req, res) => {
   try {
@@ -253,5 +254,87 @@ export const reviewApplication = async (req, res) => {
   } catch (error) {
     console.error("Error in reviewApplication:", error);
     res.status(500).json({ message: "Failed to review application", error: error.message });
+  }
+};
+
+// Export accepted students to Excel
+export const exportAcceptedStudentsToExcel = async (req, res) => {
+  try {
+    // Get all accepted applications
+    const acceptedApplications = await AdmissionApplication.find({ 
+      status: 'accepted' 
+    }).sort({ createdAt: -1 });
+
+    if (acceptedApplications.length === 0) {
+      return res.status(404).json({ 
+        message: "No accepted students found to export" 
+      });
+    }
+
+    // Prepare data for Excel - match the upload structure
+    const excelData = acceptedApplications.map((app) => {
+      // Format date of birth as string (YYYY-MM-DD format for Excel)
+      const dob = app.dateOfBirth ? new Date(app.dateOfBirth).toISOString().split('T')[0] : '';
+      
+      return {
+        'Student Name': app.studentName || '',
+        'Date of Birth': dob,
+        'Gender': app.gender || '',
+        'Grade': app.grade || '',
+        'Parent Name': app.parentName || '',
+        'Parent Email': app.parentEmail || '',
+        'Parent Phone': app.parentPhone || '',
+        'Address': app.address || '',
+        'Previous School': app.previousSchool || '',
+        'Medical Conditions': app.medicalConditions || '',
+        'Application ID': app._id.toString(),
+        'Accepted Date': app.reviewedAt ? new Date(app.reviewedAt).toISOString().split('T')[0] : ''
+      };
+    });
+
+    // Create workbook and worksheet
+    const workbook = xlsx.utils.book_new();
+    const worksheet = xlsx.utils.json_to_sheet(excelData);
+
+    // Set column widths
+    const columnWidths = [
+      { wch: 20 }, // Student Name
+      { wch: 12 }, // Date of Birth
+      { wch: 10 }, // Gender
+      { wch: 10 }, // Grade
+      { wch: 20 }, // Parent Name
+      { wch: 25 }, // Parent Email
+      { wch: 15 }, // Parent Phone
+      { wch: 30 }, // Address
+      { wch: 25 }, // Previous School
+      { wch: 25 }, // Medical Conditions
+      { wch: 25 }, // Application ID
+      { wch: 15 }  // Accepted Date
+    ];
+    worksheet['!cols'] = columnWidths;
+
+    // Add worksheet to workbook
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'Accepted Students');
+
+    // Generate Excel file buffer
+    const excelBuffer = xlsx.write(workbook, { 
+      type: 'buffer', 
+      bookType: 'xlsx' 
+    });
+
+    // Set response headers for file download
+    const fileName = `Accepted_Students_${new Date().toISOString().split('T')[0]}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', excelBuffer.length);
+
+    // Send the file
+    res.send(excelBuffer);
+  } catch (error) {
+    console.error("Error in exportAcceptedStudentsToExcel:", error);
+    res.status(500).json({ 
+      message: "Failed to export accepted students", 
+      error: error.message 
+    });
   }
 };

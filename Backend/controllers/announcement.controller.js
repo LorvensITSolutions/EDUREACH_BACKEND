@@ -1,5 +1,8 @@
+import mongoose from "mongoose";
 import Announcement from "../models/announcement.model.js";
 import Parent from "../models/parent.model.js";
+import Teacher from "../models/teacher.model.js";
+import Student from "../models/student.model.js";
 import { sendWhatsApp } from "../utils/sendWhatsApp.js";
 import axios from "axios";
 
@@ -117,12 +120,24 @@ const translateText = async (text, source = "en", target = "te") => {
   }
 };
 
+// Helper function to normalize phone numbers
+const normalizePhoneNumber = (num) => {
+  if (!num) return null;
+  if (num.startsWith("+")) return num;
+  if (num.startsWith("91")) return `+${num}`;
+  return `+91${num}`;
+};
+
 // Create announcement and send WhatsApp
 export const createAnnouncement = async (req, res) => {
   try {
     // Ensure required fields and set defaults
+    const recipientType = req.body.recipientType || 'students';
+    const targetClasses = req.body.targetClasses || []; // Array of class names, empty means all classes
     const announcementData = {
       ...req.body,
+      recipientType: recipientType,
+      targetClasses: Array.isArray(targetClasses) ? targetClasses : [],
       pinned: req.body.pinned || false, // Ensure pinned field exists
       date: req.body.date || new Date(), // Ensure date field exists
       priority: req.body.priority || 'medium', // Ensure priority field exists
@@ -141,18 +156,87 @@ export const createAnnouncement = async (req, res) => {
     
     console.log("🔤 Final message to send:", finalMessage);
     console.log("🔤 Message language check:", finalMessage === messageEn ? "English" : "Telugu");
+    console.log(`📬 Recipient Type: ${recipientType}`);
 
-    const parents = await Parent.find({}, "phone -_id");
-    const phoneNumbers = parents
-      .map(p => p.phone)
-      .filter(Boolean)
-      .map(num => {
-        if (num.startsWith("+")) return num;
-        if (num.startsWith("91")) return `+${num}`;
-        return `+91${num}`;
-      });
+    // Collect phone numbers based on recipientType
+    let phoneNumbers = [];
+    let recipientDetails = [];
 
-    console.log(`📱 Found ${phoneNumbers.length} phone numbers to send messages to`);
+    // Fetch parents/students if recipientType is 'students' or 'all'
+    if (recipientType === 'students' || recipientType === 'all') {
+      let parentIds = [];
+      
+      // If specific classes are selected, fetch parents of students in those classes
+      if (targetClasses && targetClasses.length > 0) {
+        console.log(`📚 Filtering by classes: ${targetClasses.join(', ')}`);
+        // Find all students in the specified classes (all sections)
+        const students = await Student.find(
+          { 
+            class: { $in: targetClasses },
+            isActive: true,
+            status: 'active'
+          },
+          "parent -_id"
+        ).populate('parent', 'phone name _id');
+        
+        // Get unique parent IDs (filter out null/undefined parents)
+        const parentIdSet = new Set();
+        students.forEach(s => {
+          if (s.parent && s.parent._id) {
+            // Store as ObjectId for query
+            parentIdSet.add(s.parent._id.toString());
+          }
+        });
+        parentIds = Array.from(parentIdSet);
+        console.log(`👨‍👩‍👧‍👦 Found ${students.length} students in selected classes, ${parentIds.length} unique parents`);
+      } else {
+        // If no specific classes, fetch all parents
+        console.log(`📚 No class filter - fetching all parents`);
+        const allParents = await Parent.find({}, "_id");
+        parentIds = allParents.map(p => p._id.toString());
+      }
+      
+      // Fetch parent details with phone numbers
+      // Convert string IDs back to ObjectIds for the query
+      const parentObjectIds = parentIds.map(id => new mongoose.Types.ObjectId(id));
+      const parents = await Parent.find(
+        { _id: { $in: parentObjectIds } },
+        "phone name -_id"
+      );
+      
+      const parentPhones = parents
+        .map(p => ({
+          phone: normalizePhoneNumber(p.phone),
+          name: p.name,
+          type: 'parent'
+        }))
+        .filter(p => p.phone);
+      
+      phoneNumbers.push(...parentPhones.map(p => p.phone));
+      recipientDetails.push(...parentPhones);
+      console.log(`📱 Found ${parentPhones.length} parent phone numbers`);
+    }
+
+    // Fetch teachers if recipientType is 'teachers' or 'all'
+    if (recipientType === 'teachers' || recipientType === 'all') {
+      const teachers = await Teacher.find({}, "phone name -_id");
+      const teacherPhones = teachers
+        .map(t => ({
+          phone: normalizePhoneNumber(t.phone),
+          name: t.name,
+          type: 'teacher'
+        }))
+        .filter(t => t.phone);
+      
+      phoneNumbers.push(...teacherPhones.map(t => t.phone));
+      recipientDetails.push(...teacherPhones);
+      console.log(`👨‍🏫 Found ${teacherPhones.length} teacher phone numbers`);
+    }
+
+    // Remove duplicates
+    phoneNumbers = [...new Set(phoneNumbers)];
+
+    console.log(`📱 Total unique phone numbers to send messages to: ${phoneNumbers.length}`);
 
     let successCount = 0;
     let failureCount = 0;
@@ -199,10 +283,15 @@ export const createAnnouncement = async (req, res) => {
       { new: true }
     );
 
+    const recipientTypeLabel = recipientType === 'students' ? 'Students/Parents' : 
+                               recipientType === 'teachers' ? 'Teachers' : 'All (Students & Teachers)';
+
     res.status(201).json({
       success: true,
-      message: `Announcement created! WhatsApp: ${successCount} sent, ${failureCount} failed`,
-      data: updatedAnnouncement,
+      message: `Announcement created for ${recipientTypeLabel}! WhatsApp: ${successCount} sent, ${failureCount} failed`,
+      announcement: updatedAnnouncement,
+      data: updatedAnnouncement, // Also include as 'data' for backward compatibility
+      queuedCount: phoneNumbers.length,
       whatsappStats: { sent: successCount, failed: failureCount, total: phoneNumbers.length },
     });
   } catch (err) {

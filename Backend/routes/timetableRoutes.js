@@ -2,7 +2,7 @@ import express from "express";
 import { Subject, Teacher, ClassGroup, TimetableGenerator } from "../lib/generator.js";
 import {TimetableModel} from '../models/timetableModel.js';
 import TeacherModel from "../models/teacher.model.js";
-import { protectRoute, teacherRoute, studentRoute } from "../middleware/auth.middleware.js";
+import { protectRoute, teacherRoute, studentRoute, parentRoute } from "../middleware/auth.middleware.js";
 import { validateTimetableInput, validateSubjectsExist, validateTeachersExist, validateClassesExist, detectConflicts } from "../utils/timetableValidation.js";
 import { initProgress, updateProgress, getProgress, completeProgress, failProgress } from "../utils/timetableProgress.js";
 import { TimetableTemplateModel } from "../models/timetableTemplateModel.js";
@@ -378,6 +378,63 @@ router.get("/students-timetable", protectRoute, studentRoute, async (req, res) =
       periodsPerDay: latestTimetable.periodsPerDay
     });
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Parent fetches timetables for all their children
+router.get("/parents-timetable", protectRoute, parentRoute, async (req, res) => {
+  try {
+    const parentId = req.user.parentId;
+    
+    if (!parentId) {
+      return res.status(400).json({ success: false, message: "Parent ID not found" });
+    }
+
+    // Fetch all children for this parent
+    const children = await StudentModel.find({ parent: parentId })
+      .select("name class section _id studentId");
+
+    if (!children || children.length === 0) {
+      return res.status(404).json({ success: false, message: "No children found for this parent" });
+    }
+
+    // Get the latest timetable
+    const latestTimetable = await TimetableModel.findOne().sort({ createdAt: -1 });
+    if (!latestTimetable) {
+      return res.status(404).json({ success: false, message: "No timetable found" });
+    }
+
+    // For each child, find their class timetable
+    const childrenTimetables = children.map(child => {
+      // Format class name to match frontend format (e.g., "10A")
+      const className = `${child.class}${child.section}`;
+      const classObj = latestTimetable.classes.find(
+        (cls) => cls.name === className
+      );
+
+      return {
+        _id: child._id.toString(),
+        studentId: child._id.toString(), // Use _id as studentId for consistency
+        studentName: child.name,
+        studentIdNumber: child.studentId || child._id.toString(),
+        class: className,
+        classNumber: child.class,
+        section: child.section,
+        timetable: classObj ? classObj.timetable : null,
+        hasTimetable: !!classObj,
+        message: classObj ? null : `Timetable is not created yet for ${className}`
+      };
+    });
+
+    res.json({
+      success: true,
+      children: childrenTimetables,
+      days: latestTimetable.days,
+      periodsPerDay: latestTimetable.periodsPerDay
+    });
+  } catch (err) {
+    console.error("Parent timetable fetch error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

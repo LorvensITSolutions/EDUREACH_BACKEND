@@ -4,6 +4,11 @@ import Parent from "../models/parent.model.js";
 import FeePayment from "../models/feePayment.model.js"; // ✅ <-- THIS IS IMPORTANT
 import CustomFee from "../models/customFee.model.js";
 import { getAcademicYear } from "../config/appConfig.js";
+import { 
+  getCurrentAcademicYear, 
+  getPreviousAcademicYear, 
+  getNextAcademicYear 
+} from "../utils/academicYear.js";
 
 // POST /api/admin/fee-structure
 export const createFeeStructure = async (req, res) => {
@@ -137,27 +142,124 @@ export const updateStructure = async (req, res) => {
   }
 };
 
+// Helper function to determine student's class for a given academic year (same logic as promotion controller)
+const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
+  const promotionHistory = student.promotionHistory || [];
+  
+  // Check if there's a revert record for this academic year (takes precedence)
+  const revertRecord = promotionHistory.find(
+    p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+  );
+  
+  // Check if student was promoted IN this academic year (and not reverted)
+  const promotionInThisYear = promotionHistory.find(
+    p => p.academicYear === targetAcademicYear && 
+         p.promotionType === 'promoted' && 
+         !p.reverted
+  );
+  
+  if (revertRecord) {
+    // Student's promotion was reverted - show them in the class they were reverted to
+    return {
+      displayClass: revertRecord.toClass,
+      displaySection: revertRecord.toSection
+    };
+  }
+  
+  if (promotionInThisYear) {
+    // Student was promoted in this year (and not reverted) - show them in their OLD class (fromClass)
+    return {
+      displayClass: promotionInThisYear.fromClass,
+      displaySection: promotionInThisYear.fromSection
+    };
+  }
+  
+  // Check if student was promoted in the PREVIOUS academic year (affects this year)
+  const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+  const revertInPreviousYear = promotionHistory.find(
+    p => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+  );
+  
+  if (revertInPreviousYear) {
+    // Promotion was reverted in previous year - show them in the class they were reverted to
+    return {
+      displayClass: revertInPreviousYear.toClass,
+      displaySection: revertInPreviousYear.toSection
+    };
+  }
+  
+  const promotionInPreviousYear = promotionHistory.find(
+    p => p.academicYear === previousAcademicYear && 
+         p.promotionType === 'promoted' && 
+         !p.reverted
+  );
+  
+  if (promotionInPreviousYear) {
+    // Student was promoted in previous year (and not reverted) - show them in their NEW class (toClass) for this year
+    return {
+      displayClass: promotionInPreviousYear.toClass,
+      displaySection: promotionInPreviousYear.toSection
+    };
+  }
+  
+  // No promotion affecting this year - use current class
+  return {
+    displayClass: student.class,
+    displaySection: student.section
+  };
+};
+
 // GET /api/parent/fee-structure
 export const getFeeStructureForAllChildren = async (req, res) => {
   try {
     const parentId = req.user.parentId;
-    const academicYear = getAcademicYear();
+    const currentAcademicYear = getCurrentAcademicYear();
 
     const children = await Student.find({ parent: parentId })
       .populate("parent", "email name")
       .lean();
 
+    // Get all unique academic years from fee structures (past, current, and future)
+    const allFeeStructures = await FeeStructure.find({}).select("academicYear").lean();
+    const uniqueAcademicYears = [...new Set(allFeeStructures.map(fs => fs.academicYear))].sort();
+
+    // If no fee structures exist, return empty result
+    if (uniqueAcademicYears.length === 0) {
+      return res.status(200).json({ success: true, children: [] });
+    }
+
     const result = await Promise.all(
       children.map(async (student) => {
+        // Get fee structures for all academic years
+        const feeStructuresByYear = await Promise.all(
+          uniqueAcademicYears.map(async (academicYear) => {
+            // Determine student's class for this academic year
+            const { displayClass, displaySection } = getStudentClassForAcademicYear(student, academicYear);
+
+            // Try to find fee structure for this academic year and class
         const feeStructure = await FeeStructure.findOne({
-          class: student.class,
-          section: student.section,
-          academicYear,
+              class: displayClass,
+              section: displaySection,
+              academicYear: String(academicYear).trim(),
+            }).lean();
+
+            // Also check for custom fee
+            const customFee = await CustomFee.findOne({
+              student: student._id,
+              academicYear: String(academicYear).trim(),
         }).lean();
 
+            const feeStructureToUse = customFee || feeStructure;
+
+            // If no fee structure found for this academic year, skip it
+            if (!feeStructureToUse) {
+              return null;
+            }
+
+            // Get payments for this academic year
         const payments = await FeePayment.find({
           student: student._id,
-          academicYear,
+              academicYear: String(academicYear).trim(),
           status: "paid",
         })
           .sort({ paidAt: -1 })
@@ -168,13 +270,14 @@ export const getFeeStructureForAllChildren = async (req, res) => {
           0
         );
 
-        const totalFee = feeStructure?.totalFee || 0;
+            const totalFee = feeStructureToUse?.totalFee || 0;
         const remaining = totalFee - totalPaid;
 
         return {
-          student,
           academicYear,
-          feeStructure,
+              displayClass,
+              displaySection,
+              feeStructure: feeStructureToUse,
           latestPayment: payments[0]
             ? {
                 ...payments[0],
@@ -183,17 +286,28 @@ export const getFeeStructureForAllChildren = async (req, res) => {
             : null,
           totalPaid,
           remaining,
-          discount: feeStructure?.discount || 0,
-          discountPercentage: feeStructure?.discountPercentage || "0%",
+              discount: feeStructureToUse?.discount || 0,
+              discountPercentage: feeStructureToUse?.discountPercentage || "0%",
           paymentHistory: payments.map((p) => ({
             amountPaid: p.amountPaid,
             lateFee: p.lateFee,
             total: (p.amountPaid || 0) + (p.lateFee || 0),
             paidAt: p.paidAt,
             receiptUrl: p.receiptUrl,
-            receiptNumber: p._id.toString().slice(-8).toUpperCase(), // Generate receipt number from ID
+                receiptNumber: p._id.toString().slice(-8).toUpperCase(),
             status: p.status,
+                paymentMethod: p.paymentMethod,
           })),
+            };
+          })
+        );
+
+        // Filter out null entries (academic years with no fee structure)
+        const validFeeStructures = feeStructuresByYear.filter(fs => fs !== null);
+
+        return {
+          student,
+          feeStructures: validFeeStructures, // Array of fee structures for different academic years
         };
       })
     );

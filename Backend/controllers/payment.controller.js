@@ -14,10 +14,76 @@ import Setting from "../models/setting.model.js";
 import Student from "../models/student.model.js";
 import crypto from "node:crypto";
 import { appConfig, getAcademicYear } from "../config/appConfig.js";
+import { getCurrentAcademicYear, isValidAcademicYear, getPreviousAcademicYear } from "../utils/academicYear.js";
+
+// Helper function to determine student's class for a given academic year (same logic as promotion controller)
+const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
+  const promotionHistory = student.promotionHistory || [];
+  
+  // Check if there's a revert record for this academic year (takes precedence)
+  const revertRecord = promotionHistory.find(
+    p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+  );
+  
+  // Check if student was promoted IN this academic year (and not reverted)
+  const promotionInThisYear = promotionHistory.find(
+    p => p.academicYear === targetAcademicYear && 
+         p.promotionType === 'promoted' && 
+         !p.reverted
+  );
+  
+  if (revertRecord) {
+    return {
+      displayClass: revertRecord.toClass,
+      displaySection: revertRecord.toSection
+    };
+  }
+  
+  if (promotionInThisYear) {
+    // Student was promoted in this year (and not reverted) - show them in their OLD class (fromClass)
+    return {
+      displayClass: promotionInThisYear.fromClass,
+      displaySection: promotionInThisYear.fromSection
+    };
+  }
+  
+  // Check if student was promoted in the PREVIOUS academic year (affects this year)
+  const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+  const revertInPreviousYear = promotionHistory.find(
+    p => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+  );
+  
+  if (revertInPreviousYear) {
+    return {
+      displayClass: revertInPreviousYear.toClass,
+      displaySection: revertInPreviousYear.toSection
+    };
+  }
+  
+  const promotionInPreviousYear = promotionHistory.find(
+    p => p.academicYear === previousAcademicYear && 
+         p.promotionType === 'promoted' && 
+         !p.reverted
+  );
+  
+  if (promotionInPreviousYear) {
+    // Student was promoted in previous year (and not reverted) - show them in their NEW class (toClass) for this year
+    return {
+      displayClass: promotionInPreviousYear.toClass,
+      displaySection: promotionInPreviousYear.toSection
+    };
+  }
+  
+  // No promotion affecting this year - use current class
+  return {
+    displayClass: student.class,
+    displaySection: student.section
+  };
+};
 
 export const createPaymentOrder = async (req, res) => {
   try {
-    const { studentId, amount, paymentMethod = "online" } = req.body; // ✅ Add payment method
+    const { studentId, amount, paymentMethod = "online", academicYear: academicYearParam } = req.body; // ✅ Add academic year parameter
     // Basic validation
     if (!studentId || typeof studentId !== "string") {
       return res.status(400).json({ success: false, message: "Invalid studentId" });
@@ -30,19 +96,29 @@ export const createPaymentOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid payment method" });
     }
     const parentId = req.user.parentId;
-    const academicYear = getAcademicYear();
+    // Use provided academic year or default to current
+    const academicYear = academicYearParam || getAcademicYear();
+    if (academicYearParam && !isValidAcademicYear(academicYearParam)) {
+      return res.status(400).json({ success: false, message: "Invalid academic year format" });
+    }
 
     const student = await Student.findById(studentId);
     if (!student) {
       return res.status(404).json({ success: false, message: "Student not found" });
     }
 
+    // Determine student's class for this academic year
+    const { displayClass, displaySection } = getStudentClassForAcademicYear(student, academicYear);
+
     // 1. Check custom fee first
     let feeStructure;
     let frequency = "annually";
     let dueDate = null;
 
-    const customFee = await CustomFee.findOne({ student: studentId, academicYear });
+    const customFee = await CustomFee.findOne({ 
+      student: studentId, 
+      academicYear: String(academicYear).trim() 
+    });
 
     if (customFee) {
       feeStructure = customFee;
@@ -50,13 +126,16 @@ export const createPaymentOrder = async (req, res) => {
       dueDate = customFee.dueDate;
     } else {
       feeStructure = await FeeStructure.findOne({
-        class: student.class,
-        section: student.section,
-        academicYear,
+        class: displayClass,
+        section: displaySection,
+        academicYear: String(academicYear).trim(),
       });
 
       if (!feeStructure) {
-        return res.status(404).json({ success: false, message: "Fee structure not found" });
+        return res.status(404).json({ 
+          success: false, 
+          message: `Fee structure not found for Class ${displayClass} ${displaySection} in academic year ${academicYear}` 
+        });
       }
 
       frequency = feeStructure.frequency || "annually";
@@ -68,7 +147,7 @@ export const createPaymentOrder = async (req, res) => {
 
     const previousPayments = await FeePayment.find({
       student: studentId,
-      academicYear,
+      academicYear: String(academicYear).trim(),
       status: "paid"
     });
 
@@ -111,7 +190,7 @@ export const createPaymentOrder = async (req, res) => {
       const feePayment = await FeePayment.create({
         parent: parentId,
         student: studentId,
-        academicYear,
+        academicYear: String(academicYear).trim(),
         amountPaid: amount,
         lateFee,
         frequency,
@@ -140,7 +219,7 @@ export const createPaymentOrder = async (req, res) => {
     const feePayment = await FeePayment.create({
       parent: parentId,
       student: studentId,
-      academicYear,
+      academicYear: String(academicYear).trim(),
       amountPaid: amount,
       lateFee,
       frequency,
@@ -514,44 +593,265 @@ export const getFeeStructureForAllChildren = async (req, res) => {
 // ✅ getAllStudentsFeeStatus with Filters, Search, Pagination, and Total Due
 export const getAllStudentsFeeStatus = async (req, res) => {
   try {
-    const academicYear = "2025-2026"; // TODO: make dynamic
+    // Get academic year from query or use current academic year
+    const { status, search, customFeeFilter, page = 1, limit = 10, academicYear: academicYearParam } = req.query;
+    const academicYear = (academicYearParam && isValidAcademicYear(academicYearParam)) 
+      ? academicYearParam 
+      : getCurrentAcademicYear();
     const today = new Date();
-
- const { status, search, customFeeFilter, page = 1, limit = 10 } = req.query;
     const skip = (page - 1) * limit;
 
-    const students = await Student.find()
+    console.log(`\n=== Fee Status Query ===`);
+    console.log(`Academic Year Parameter: ${academicYearParam}`);
+    console.log(`Academic Year Used: ${academicYear}`);
+    console.log(`Status Filter: ${status || 'All'}`);
+    console.log(`Search: ${search || 'None'}`);
+    console.log(`Custom Fee Filter: ${customFeeFilter || 'All'}`);
+
+    // OPTIMIZATION: Fetch all fee structures, custom fees, and payments in bulk
+    const feeStructuresForYear = await FeeStructure.find({ academicYear: String(academicYear).trim() }).lean();
+    console.log(`Fee structures found for ${academicYear}: ${feeStructuresForYear.length}`);
+    
+    // Create a map for O(1) lookup: "class-section" -> feeStructure
+    const feeStructureMap = new Map();
+    feeStructuresForYear.forEach(fs => {
+      const key = `${fs.class}-${fs.section}`;
+      feeStructureMap.set(key, fs);
+    });
+    
+    // Fetch all custom fees for this academic year in one query
+    const allCustomFees = await CustomFee.find({ academicYear: String(academicYear).trim() }).lean();
+    const customFeeMap = new Map();
+    allCustomFees.forEach(cf => {
+      customFeeMap.set(cf.student.toString(), cf);
+    });
+    
+    // Fetch all payments for this academic year in one query
+    const allPayments = await FeePayment.find({
+      academicYear: String(academicYear).trim(),
+      status: "paid"
+    })
+      .select("student amountPaid lateFee paidAt receiptUrl receiptNumber status paymentMethod")
+      .lean();
+    
+    // Group payments by student ID for O(1) lookup
+    const paymentsMap = new Map();
+    allPayments.forEach(payment => {
+      const studentId = payment.student.toString();
+      if (!paymentsMap.has(studentId)) {
+        paymentsMap.set(studentId, []);
+      }
+      paymentsMap.get(studentId).push(payment);
+    });
+    
+    console.log(`Custom fees found: ${allCustomFees.length}`);
+    console.log(`Payments found: ${allPayments.length}`);
+
+    // Fetch students with pagination and search filters applied early
+    let studentQuery = Student.find();
+    
+    // Apply search filter early if provided (reduces number of students to process)
+    if (search) {
+      const searchRegex = new RegExp(search, 'i');
+      studentQuery = studentQuery.or([
+        { name: searchRegex },
+        { studentId: searchRegex }, // Prioritize studentId search
+        { class: searchRegex },
+        { section: searchRegex },
+        { rollNumber: searchRegex } // Keep rollNumber for backward compatibility
+      ]);
+    }
+    
+    const students = await studentQuery
       .populate("parent", "name email")
       .lean();
+    
+    console.log(`Students to process: ${students.length} (after search filter: ${search || 'none'})`);
+
+    // Helper function to determine which class a student should appear in for the selected academic year
+    // This matches the logic from promotion.controller.js
+    const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
+      const promotionHistory = student.promotionHistory || [];
+      
+      // Check if there's a revert record for this academic year (takes precedence)
+      const revertRecord = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      // Check if student was promoted IN this academic year (and not reverted)
+      const promotionInThisYear = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      if (revertRecord) {
+        // Student's promotion was reverted - show them in the class they were reverted to
+        return {
+          displayClass: revertRecord.toClass,
+          displaySection: revertRecord.toSection
+        };
+      }
+      
+      if (promotionInThisYear) {
+        // Student was promoted in this year (and not reverted) - show them in their OLD class (fromClass)
+        return {
+          displayClass: promotionInThisYear.fromClass,
+          displaySection: promotionInThisYear.fromSection
+        };
+      }
+      
+      // Check if student was promoted in the PREVIOUS academic year (affects this year)
+      const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+      const revertInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      if (revertInPreviousYear) {
+        // Promotion was reverted in previous year - show them in the class they were reverted to
+        return {
+          displayClass: revertInPreviousYear.toClass,
+          displaySection: revertInPreviousYear.toSection
+        };
+      }
+      
+      const promotionInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      if (promotionInPreviousYear) {
+        // Student was promoted in previous year (and not reverted) - show them in their NEW class (toClass) for this year
+        return {
+          displayClass: promotionInPreviousYear.toClass,
+          displaySection: promotionInPreviousYear.toSection
+        };
+      }
+      
+      // Check if there's a hold-back record in the previous academic year
+      const holdBackInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && 
+             p.promotionType === 'hold-back' && 
+             !p.reverted
+      );
+      
+      if (holdBackInPreviousYear) {
+        // Student was held back in previous year - they stay in the same class (fromClass = toClass for hold-back)
+        return {
+          displayClass: holdBackInPreviousYear.fromClass, // Same as toClass for hold-back
+          displaySection: holdBackInPreviousYear.fromSection
+        };
+      }
+      
+      // IMPORTANT: If we're viewing a future academic year (e.g., 2026-2027) and a student has
+      // no promotion or hold-back record for the previous year (2025-2026), this means:
+      // 
+      // 1. They were NOT promoted in 2025-2026 (no promotion record)
+      // 2. They were NOT held back in 2025-2026 (no hold-back record)
+      // 3. They might be a new student or their promotion status is unknown
+      //
+      // For fee management purposes, we should NOT show students who don't have a promotion
+      // record for the previous academic year when viewing a future academic year, because:
+      // - If they were in Class 6-C in 2025-2026 and weren't promoted, they should have a hold-back record
+      // - If they were in Class 5-C in 2025-2026 and were promoted, they should have a promotion record
+      // - If they have no record, we can't determine their class for the target academic year
+      //
+      // However, if we're viewing the current or past academic year, we can use their database class
+      // as a fallback.
+      
+      // Check if we're viewing a future academic year
+      const currentAcademicYear = getCurrentAcademicYear();
+      const isFutureYear = targetAcademicYear > currentAcademicYear;
+      
+      if (isFutureYear) {
+        // For future academic years, only show students who have promotion/hold-back records
+        // This ensures we only show students who were actually processed for that year
+        // If no promotion or hold-back record exists, exclude this student
+        // Return null to exclude this student (will be filtered out)
+        return null;
+      }
+      
+      // For current or past academic years, use database class as fallback
+      return {
+        displayClass: student.class,
+        displaySection: student.section
+      };
+    };
 
     const result = await Promise.all(
       students.map(async (student) => {
-        const defaultStructure = await FeeStructure.findOne({
-          class: student.class,
-          section: student.section,
-          academicYear,
-        }).lean();
+        try {
+          // Determine which class the student should appear in for this academic year
+          const classInfo = getStudentClassForAcademicYear(student, academicYear);
+          
+          // If classInfo is null, student should not be included (no promotion record for future years)
+          if (!classInfo) {
+            return null;
+          }
+          
+          const { displayClass, displaySection } = classInfo;
+        
+        // OPTIMIZATION: Use Map lookup instead of database query (O(1) vs O(log n))
+        const structureKey = `${displayClass}-${displaySection}`;
+        const defaultStructure = feeStructureMap.get(structureKey);
+        
+        // Debug: Log if student's display class doesn't match their database class
+        if (displayClass !== student.class || displaySection !== student.section) {
+          if (students.indexOf(student) < 5) {
+            console.log(`Student ${student.studentId} (${student.name}): DB class=${student.class}-${student.section}, Display class=${displayClass}-${displaySection} for ${academicYear}`);
+          }
+        }
 
-        const customFee = await CustomFee.findOne({
-          student: student._id,
-          academicYear,
-        }).lean();
+        // OPTIMIZATION: Use Map lookup instead of database query
+        const customFee = customFeeMap.get(student._id.toString());
 
         const feeStructureToUse = customFee || defaultStructure;
-        if (!feeStructureToUse) return null;
+        
+        // Only include students who have a fee structure for this academic year
+        if (!feeStructureToUse) {
+          // Debug: Log why student is excluded (only log first 5 to avoid spam)
+          if (students.indexOf(student) < 5) {
+            console.log(`Student ${student.studentId} (${student.name}) excluded: No fee structure found for Class ${displayClass}-${displaySection} in academic year ${academicYear} (DB class: ${student.class}, DB section: ${student.section})`);
+          }
+          return null;
+        }
+        
+        // Debug: Log included students with promotion history details
+        const promotionHistoryForYear = (student.promotionHistory || []).filter(
+          p => p.academicYear === academicYear || p.academicYear === getPreviousAcademicYear(academicYear)
+        );
+        
+        if (displayClass === '2' && displaySection === 'A') {
+          // Log all Class 2-A students in detail
+          console.log(`\n📋 Class 2-A Student: ${student.studentId} (${student.name})`);
+          console.log(`   DB Class: ${student.class}-${student.section}`);
+          console.log(`   Display Class for ${academicYear}: ${displayClass}-${displaySection}`);
+          // Safely log promotion history without circular references
+          const safePromotionHistory = promotionHistoryForYear.map(p => ({
+            academicYear: p.academicYear,
+            fromClass: p.fromClass,
+            fromSection: p.fromSection,
+            toClass: p.toClass,
+            toSection: p.toSection,
+            promotionType: p.promotionType,
+            reverted: p.reverted
+          }));
+          console.log(`   Promotion History:`, safePromotionHistory);
+          console.log(`   Fee: ₹${feeStructureToUse.totalFee}`);
+        } else if (students.indexOf(student) < 5) {
+          // Log first 5 other students
+          console.log(`Student ${student.studentId} (${student.name}) included: Display Class ${displayClass}-${displaySection} (DB: ${student.class}-${student.section}) in academic year ${academicYear}, Fee: ₹${feeStructureToUse.totalFee}`);
+        }
 
         const baseFee = feeStructureToUse.totalFee || 0;
-        const lateFeePerDay = customFee?.lateFeePerDay || 0;
-        const dueDate = customFee?.dueDate;
+        const lateFeePerDay = customFee?.lateFeePerDay || feeStructureToUse?.lateFeePerDay || 0;
+        // Get dueDate from customFee first, then from feeStructure, then null
+        const dueDate = customFee?.dueDate || feeStructureToUse?.dueDate || null;
 
-        const payments = await FeePayment.find({
-          student: student._id,
-          academicYear,
-          status: "paid",
-        })
-          .sort({ paidAt: -1 })
-          .select("amountPaid lateFee paidAt receiptUrl receiptNumber status")
-          .lean();
+        // OPTIMIZATION: Use Map lookup instead of database query
+        const payments = (paymentsMap.get(student._id.toString()) || [])
+          .sort((a, b) => new Date(b.paidAt) - new Date(a.paidAt)); // Sort by paidAt descending
 
         const totalPaid = payments.reduce((sum, p) => {
           return sum + (p.amountPaid || 0) + (p.lateFee || 0);
@@ -585,8 +885,17 @@ export const getAllStudentsFeeStatus = async (req, res) => {
           ).toFixed(2);
         }
 
+        // Update student object with display class for this academic year
+        const studentWithDisplayClass = {
+          ...student,
+          displayClass: displayClass,
+          displaySection: displaySection,
+          actualClass: student.class, // Keep original class for reference
+          actualSection: student.section
+        };
+
         return {
-          student,
+          student: studentWithDisplayClass,
           parent: student.parent,
           academicYear,
           feeStructure: feeStructureToUse,
@@ -611,12 +920,19 @@ export const getAllStudentsFeeStatus = async (req, res) => {
             receiptUrl: p.receiptUrl,
             receiptNumber: p.receiptNumber,
             status: p.status,
+            paymentMethod: p.paymentMethod || 'online', // Include payment method
           })),
         };
+        } catch (err) {
+          console.error(`Error processing student ${student?.studentId || student?._id || 'unknown'}:`, err);
+          return null; // Return null to exclude this student from results
+        }
       })
     );
 
     let filtered = result.filter((entry) => entry !== null);
+    
+    console.log(`Students with fee structures for ${academicYear}: ${filtered.length}`);
 
 // 🔍 Filter by payment status
 if (status) {
@@ -626,7 +942,7 @@ if (status) {
   );
 }
 
-// 🔍 Filter by search (name, class, section, roll number)
+// 🔍 Filter by search (name, class, section, student ID)
 if (search) {
   const query = search.toLowerCase();
   filtered = filtered.filter((s) => {
@@ -634,8 +950,12 @@ if (search) {
       s.student.name.toLowerCase().includes(query) ||
       s.student.class.toLowerCase().includes(query) ||
       s.student.section.toLowerCase().includes(query) ||
-      (s.student.rollNumber &&
-        s.student.rollNumber.toLowerCase().includes(query))
+      (s.student.studentId &&
+        s.student.studentId.toLowerCase().includes(query)) ||
+      (s.student.displayClass &&
+        s.student.displayClass.toLowerCase().includes(query)) ||
+      (s.student.displaySection &&
+        s.student.displaySection.toLowerCase().includes(query))
     );
   });
 }
@@ -651,6 +971,63 @@ if (customFeeFilter === "yes") {
     const totalDueSum = filtered.reduce((sum, item) => sum + item.remaining, 0);
     const totalPages = Math.ceil(filtered.length / limit);
     const paginated = filtered.slice(skip, skip + Number(limit));
+    
+    console.log(`Final filtered count: ${filtered.length}`);
+    console.log(`Paginated results: ${paginated.length} (page ${page} of ${totalPages})`);
+    
+    // Summary by class-section
+    const classSectionSummary = {};
+    const dbClassSummary = {};
+    filtered.forEach(item => {
+      const displayKey = `${item.student.displayClass || item.student.class}-${item.student.displaySection || item.student.section}`;
+      const dbKey = `${item.student.class}-${item.student.section}`;
+      classSectionSummary[displayKey] = (classSectionSummary[displayKey] || 0) + 1;
+      dbClassSummary[dbKey] = (dbClassSummary[dbKey] || 0) + 1;
+    });
+    console.log(`Students by display class-section (for ${academicYear}):`, classSectionSummary);
+    console.log(`Students by database class-section:`, dbClassSummary);
+    
+    // Detailed breakdown for specific classes (2-A, 6-C, etc.)
+    try {
+      const classesToDebug = ['2-A', '6-C'];
+      classesToDebug.forEach(classKey => {
+        if (classSectionSummary[classKey]) {
+          const [targetClass, targetSection] = classKey.split('-');
+          const classStudents = filtered.filter(item => {
+            if (!item || !item.student) return false;
+            const displayClass = item.student.displayClass || item.student.class;
+            const displaySection = item.student.displaySection || item.student.section;
+            return displayClass === targetClass && displaySection === targetSection;
+          });
+          console.log(`\n🔍 Detailed breakdown for Class ${classKey} in ${academicYear}:`);
+          classStudents.forEach(item => {
+            try {
+              const student = item.student;
+              if (!student) return;
+              const promotionHistory = (student.promotionHistory || []);
+              const previousYear = getPreviousAcademicYear(academicYear);
+              const relevantPromotions = promotionHistory.filter(p => 
+                p && (p.academicYear === academicYear || p.academicYear === previousYear)
+              );
+              console.log(`  - ${student.studentId || 'N/A'} (${student.name || 'N/A'}): DB=${student.class || 'N/A'}-${student.section || 'N/A'}, Display=${student.displayClass || student.class || 'N/A'}-${student.displaySection || student.section || 'N/A'}`);
+              if (relevantPromotions.length > 0) {
+                console.log(`    Promotions:`, relevantPromotions.map(p => 
+                  `${p.academicYear || 'N/A'}: ${p.fromClass || 'N/A'}-${p.fromSection || 'N/A'} → ${p.toClass || 'N/A'}-${p.toSection || 'N/A'} (${p.promotionType || 'N/A'}${p.reverted ? ', REVERTED' : ''})`
+                ).join('; '));
+              } else {
+                console.log(`    No relevant promotions`);
+              }
+            } catch (err) {
+              console.error(`Error logging student details:`, err);
+            }
+          });
+        }
+      });
+    } catch (err) {
+      console.error(`Error in detailed breakdown:`, err);
+    }
+    
+    console.log(`=== End Fee Status Query ===\n`);
 
     res.status(200).json({
       success: true,
@@ -1170,6 +1547,81 @@ export const generatePaymentReceipt = async (req, res) => {
 };
 
 // ✅ Download Receipt Endpoint
+// ✅ Get available classes for an academic year (from fee structures)
+export const getAvailableClasses = async (req, res) => {
+  try {
+    const { academicYear: academicYearParam } = req.query;
+    const academicYear = (academicYearParam && isValidAcademicYear(academicYearParam)) 
+      ? academicYearParam 
+      : getCurrentAcademicYear();
+
+    // Get all fee structures for this academic year
+    const feeStructures = await FeeStructure.find({ 
+      academicYear: String(academicYear).trim() 
+    }).lean();
+
+    // Extract unique classes and sections
+    const classSectionMap = {};
+    feeStructures.forEach(fs => {
+      const key = `${fs.class}-${fs.section}`;
+      if (!classSectionMap[key]) {
+        classSectionMap[key] = {
+          class: fs.class,
+          section: fs.section
+        };
+      }
+    });
+
+    // Convert to array and sort
+    const classes = Object.values(classSectionMap)
+      .sort((a, b) => {
+        // Sort by class (handle numeric and non-numeric classes)
+        const aClass = isNaN(a.class) ? a.class : parseInt(a.class);
+        const bClass = isNaN(b.class) ? b.class : parseInt(b.class);
+        if (aClass < bClass) return -1;
+        if (aClass > bClass) return 1;
+        // If same class, sort by section
+        return a.section.localeCompare(b.section);
+      });
+
+    // Get unique classes only
+    const uniqueClasses = [...new Set(classes.map(c => c.class))].sort((a, b) => {
+      const aClass = isNaN(a) ? a : parseInt(a);
+      const bClass = isNaN(b) ? b : parseInt(b);
+      if (aClass < bClass) return -1;
+      if (aClass > bClass) return 1;
+      return a.localeCompare(b);
+    });
+
+    // Format class-section combinations for display (e.g., "1-A", "2-B")
+    const classSectionCombos = classes.map(c => ({
+      value: `${c.class}-${c.section}`,
+      label: `Class ${c.class}-${c.section}`,
+      class: c.class,
+      section: c.section
+    })).sort((a, b) => {
+      // Sort by class first
+      const aClass = isNaN(a.class) ? a.class : parseInt(a.class);
+      const bClass = isNaN(b.class) ? b.class : parseInt(b.class);
+      if (aClass < bClass) return -1;
+      if (aClass > bClass) return 1;
+      // Then by section
+      return a.section.localeCompare(b.section);
+    });
+
+    res.status(200).json({
+      success: true,
+      classes: uniqueClasses,
+      classSections: classes,
+      classSectionCombos: classSectionCombos, // Add class-section combinations
+      academicYear
+    });
+  } catch (err) {
+    console.error("Error fetching available classes:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 export const downloadReceipt = async (req, res) => {
   try {
     const { paymentId } = req.params;

@@ -10,8 +10,8 @@ import {
 } from "../controllers/fee.controller.js";
 
 import { sendWhatsApp } from "../utils/sendWhatsApp.js";
-import { createPaymentOrder,  getAllStudentsFeeStatus,  getMyPayments, sendFeeReminder, verifyPayment, verifyOfflinePayment, getPendingOfflinePayments, generatePaymentReceipt, downloadReceipt } from "../controllers/payment.controller.js";
-import { createOrUpdateCustomFee } from "../controllers/customFee.controller.js";
+import { createPaymentOrder,  getAllStudentsFeeStatus,  getMyPayments, sendFeeReminder, verifyPayment, verifyOfflinePayment, getPendingOfflinePayments, generatePaymentReceipt, downloadReceipt, getAvailableClasses } from "../controllers/payment.controller.js";
+import { createOrUpdateCustomFee, getAllCustomFees, updateCustomFee } from "../controllers/customFee.controller.js";
 const router = express.Router();
 
 router.post("/create-order", protectRoute, createPaymentOrder);
@@ -28,8 +28,11 @@ router.delete("/:id", protectRoute, adminRoute, deleteStructure);
 
 // ✅ ADMIN: Fee Tracking and Reminders
 router.get("/fee-defaulters", protectRoute, adminRoute, getAllStudentsFeeStatus);   // Get student status (paid/unpaid)
+router.get("/available-classes", protectRoute, adminRoute, getAvailableClasses);   // Get available classes for academic year
 router.post("/send-reminder/:studentId", protectRoute, adminRoute, sendFeeReminder);
 router.post("/custom-fee", protectRoute, adminRoute, createOrUpdateCustomFee);
+router.get("/custom-fees", protectRoute, adminRoute, getAllCustomFees);
+router.put("/custom-fee/:customFeeId", protectRoute, adminRoute, updateCustomFee);
 
 // ✅ ADMIN: Offline Payment Verification
 router.post("/verify-offline/:paymentId", protectRoute, adminRoute, verifyOfflinePayment);

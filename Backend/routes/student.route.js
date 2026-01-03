@@ -11,6 +11,7 @@ import {
   getUniqueValues,
   updateStudentImage,
   updateStudentImages,
+  searchStudentByStudentId,
 } from "../controllers/student.controller.js";
 import { upload } from "../utils/multer.js";
 import { adminRoute, protectRoute } from "../middleware/auth.middleware.js";
@@ -82,6 +83,9 @@ router.get("/profile/:studentId", protectRoute, getStudentProfile);
 
 // Get detailed student profile for admin (by student _id)
 router.get("/admin-profile/:studentId", protectRoute, adminRoute, getStudentProfileForAdmin);
+
+// Search student by studentId (for validation)
+router.get("/search/:studentId", protectRoute, adminRoute, searchStudentByStudentId);
 
 // Update single student image
 router.put("/update-image/:studentId", protectRoute, adminRoute, upload.single("image"), updateStudentImage);

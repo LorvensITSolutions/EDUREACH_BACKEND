@@ -1,5 +1,5 @@
 import express from "express";
-import { assignSectionToTeacher,uploadTeachers,getTeachers,getAllTeachers, getClassTeachersForStudent, getStudentByParent, addSingleTeacher, deleteTeacher, updateTeacherImages, getTeacherProfileForAdmin, updateTeacherImage} from "../controllers/teacher.controller.js";
+import { assignSectionToTeacher, removeSectionFromTeacher, uploadTeachers, getTeachers, getAllTeachers, getClassTeachersForStudent, getStudentByParent, addSingleTeacher, deleteTeacher, updateTeacherImages, getTeacherProfileForAdmin, updateTeacherImage} from "../controllers/teacher.controller.js";
 import { protectRoute, adminRoute,teacherRoute, studentRoute,allowRoles, parentRoute} from "../middleware/auth.middleware.js";
 import { upload } from "../utils/multer.js";
 import { getAssignedStudentsWithAttendance } from "../controllers/teacher.controller.js";
@@ -7,6 +7,7 @@ import { getAssignedStudentsWithAttendance } from "../controllers/teacher.contro
 const router = express.Router();
 
 router.post("/assign-section", protectRoute, adminRoute, assignSectionToTeacher);
+router.post("/remove-section", protectRoute, adminRoute, removeSectionFromTeacher);
 
 router.post(
   "/upload-bulk",

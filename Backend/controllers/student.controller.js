@@ -11,6 +11,10 @@ import User from "../models/user.model.js";
 import Attendance from "../models/attendance.model.js";
 import FeePayment from "../models/feePayment.model.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
+import {
+  getCurrentAcademicYear,
+  getAcademicYearDateRange
+} from "../utils/academicYear.js";
 
 // Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -145,12 +149,13 @@ export const getAllStudents = async (req, res) => {
     const totalStudents = await Student.countDocuments(filter);
     const totalPages = Math.ceil(totalStudents / limitNum);
 
-    // Get students with pagination
+    // Get students with pagination (promotionHistory is included by default in schema)
     const students = await Student.find(filter)
       .populate("parent", "name phone")
       .sort({ name: 1 })
       .skip(skip)
-      .limit(limitNum);
+      .limit(limitNum)
+      .lean(); // Use lean() for better performance and to ensure all fields are included
 
     console.log("🔍 Backend found students:", students.length);
     console.log("🔍 First student sample:", students[0]);
@@ -312,15 +317,15 @@ export const getStudentProfileForAdmin = async (req, res) => {
       return res.status(404).json({ message: "Student not found" });
     }
 
-    // Calculate real attendance statistics
-    const currentDate = new Date();
-    const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
-    const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+    // Calculate real attendance statistics for the entire academic year
+    const currentAcademicYear = getCurrentAcademicYear();
+    const { startDate, endDate } = getAcademicYearDateRange(currentAcademicYear);
 
+    // Get all attendance records for the current academic year
     const attendanceRecords = await Attendance.find({
       student: student._id,
-      date: { $gte: startOfMonth, $lte: endOfMonth }
-    });
+      date: { $gte: startDate, $lte: endDate }
+    }).sort({ date: -1 });
 
     const attendanceStats = {
       present: attendanceRecords.filter(record => record.status === 'present').length,
@@ -334,7 +339,7 @@ export const getStudentProfileForAdmin = async (req, res) => {
       : 0;
 
     // Calculate real payment statistics
-    const currentAcademicYear = "2025-2026"; // You can make this dynamic
+    // Use the same currentAcademicYear from above
     const paymentRecords = await FeePayment.find({
       student: student._id,
       academicYear: currentAcademicYear
@@ -357,13 +362,14 @@ export const getStudentProfileForAdmin = async (req, res) => {
       total: totalAmount
     };
 
-    // Get recent attendance records (last 10)
-    const recentAttendance = await Attendance.find({
-      student: student._id
-    })
-    .sort({ date: -1 })
-    .limit(10)
-    .select('date status reason');
+    // Get all attendance records for the academic year (sorted by date, newest first)
+    const recentAttendance = attendanceRecords
+      .map(record => ({
+        date: record.date,
+        status: record.status,
+        reason: record.reason || null
+      }))
+      .slice(0, 50); // Show last 50 records instead of just 10
 
     // Get recent payment records (last 10)
     const recentPayments = await FeePayment.find({
@@ -389,6 +395,95 @@ export const getStudentProfileForAdmin = async (req, res) => {
   } catch (error) {
     console.error("getStudentProfileForAdmin error:", error.message);
     res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+/**
+ * Search student by studentId (string like "S25153") for validation
+ */
+export const searchStudentByStudentId = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { academicYear } = req.query;
+    const user = req.user;
+
+    if (user.role !== "admin") {
+      return res.status(403).json({ message: "Access denied. Admin only." });
+    }
+
+    if (!studentId) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Student ID is required" 
+      });
+    }
+
+    // Find student by studentId field (e.g., "S25153") or MongoDB _id
+    const isObjectId = /^[0-9a-fA-F]{24}$/.test(studentId);
+    const student = isObjectId 
+      ? await Student.findById(studentId).select("studentId name class section status isActive promotionHistory currentAcademicYear")
+      : await Student.findOne({ studentId: studentId }).select("studentId name class section status isActive promotionHistory currentAcademicYear");
+
+    if (!student) {
+      return res.status(404).json({ 
+        success: false,
+        message: `Student not found with ID: ${studentId}` 
+      });
+    }
+
+    // Calculate promotion status
+    let promotionStatus = 'eligible'; // Default
+    const academicYearStr = academicYear || student.currentAcademicYear || getCurrentAcademicYear();
+    
+    // Check if student was promoted in this academic year
+    const promotionHistory = student.promotionHistory || [];
+    const promotionInThisYear = promotionHistory.find(
+      p => p.academicYear === academicYearStr && p.promotionType === 'promoted'
+    );
+
+    if (promotionInThisYear) {
+      promotionStatus = 'promoted';
+    } else {
+      // Calculate attendance to determine eligibility
+      const { startDate: startOfYear, endDate: endOfYear } = getAcademicYearDateRange(academicYearStr);
+      const attendanceRecords = await Attendance.find({
+        student: student._id,
+        date: { $gte: startOfYear, $lte: endOfYear }
+      });
+
+      const totalDays = attendanceRecords.length;
+      const presentDays = attendanceRecords.filter(r => r.status === 'present').length;
+      const attendancePercentage = totalDays > 0 
+        ? Math.round((presentDays / totalDays) * 100) 
+        : 0;
+
+      const minAttendanceRequired = 75;
+      if (totalDays === 0 || attendancePercentage < minAttendanceRequired) {
+        promotionStatus = 'hold-back';
+      } else {
+        promotionStatus = 'eligible';
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      student: {
+        studentId: student.studentId,
+        name: student.name,
+        class: student.class,
+        section: student.section,
+        status: student.status || 'active',
+        isActive: student.isActive,
+        promotionStatus: promotionStatus // 'eligible', 'hold-back', or 'promoted'
+      }
+    });
+  } catch (error) {
+    console.error("Search student by studentId error:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 

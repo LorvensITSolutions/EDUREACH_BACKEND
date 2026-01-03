@@ -8,6 +8,7 @@ import TeacherAttendance from "../models/TeacherAttendance.js";
 import { generateTeacherId, generateTeacherCredentials } from "../utils/credentialGenerator.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
 import { validateTeacherAssignment, validateTeacherData, checkDuplicateAssignment } from "../utils/teacherValidation.js";
+import { getCurrentAcademicYear, getPreviousAcademicYear } from "../utils/academicYear.js";
 import xlsx from "xlsx";
 import fs from "fs";
 import path from "path";
@@ -376,6 +377,83 @@ export const assignSectionToTeacher = async (req, res) => {
   }
 };
 
+// ✅ Remove section assignment from a teacher
+export const removeSectionFromTeacher = async (req, res) => {
+  try {
+    const { teacherId, className, section } = req.body;
+
+    console.log("Remove section request:", { teacherId, className, section });
+
+    if (!teacherId || !className || !section) {
+      return res.status(400).json({ 
+        message: "Teacher ID, class name, and section are required"
+      });
+    }
+
+    // Find teacher by MongoDB _id
+    const teacher = await Teacher.findById(teacherId);
+    if (!teacher) {
+      return res.status(404).json({ 
+        message: "Teacher not found"
+      });
+    }
+
+    // Check if the assignment exists
+    const assignmentIndex = teacher.sectionAssignments.findIndex(
+      assignment => assignment.className === className && assignment.section === section
+    );
+
+    if (assignmentIndex === -1) {
+      return res.status(404).json({ 
+        message: `Section ${className}-${section} is not assigned to this teacher`
+      });
+    }
+
+    // Remove the assignment
+    const updateResult = await Teacher.updateOne(
+      { _id: teacherId },
+      { $pull: { sectionAssignments: { className, section } } }
+    );
+
+    if (updateResult.modifiedCount === 0) {
+      return res.status(500).json({ 
+        message: "Failed to remove section assignment"
+      });
+    }
+
+    // Fetch the updated teacher for response
+    const updatedTeacher = await Teacher.findById(teacherId);
+    
+    if (!updatedTeacher) {
+      return res.status(500).json({ 
+        message: "Failed to fetch updated teacher"
+      });
+    }
+
+    console.log("Section removed successfully:", updatedTeacher.sectionAssignments);
+
+    // ✅ Invalidate teacher caches
+    await invalidateCache.teachers();
+
+    res.status(200).json({
+      message: "Section removed successfully",
+      teacher: {
+        _id: updatedTeacher._id,
+        teacherId: updatedTeacher.teacherId,
+        name: updatedTeacher.name,
+        sectionAssignments: updatedTeacher.sectionAssignments
+      }
+    });
+  } catch (error) {
+    console.error("Remove section error:", error);
+    res.status(500).json({ 
+      message: "Server error", 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+};
+
 
 // ✅ Get students and their attendance assigned to logged-in teacher
 export const getAssignedStudentsWithAttendance = async (req, res) => {
@@ -391,7 +469,43 @@ export const getAssignedStudentsWithAttendance = async (req, res) => {
       section,
     }));
 
-    const students = await Student.find({ $or: sectionQueries });
+    // Get assigned classes list for frontend dropdown (ensures all assigned classes appear)
+    const assignedClasses = teacher.sectionAssignments.map(sa => `${sa.className}-${sa.section}`);
+
+    // Get current academic year to check promotion history
+    const currentAcademicYear = getCurrentAcademicYear();
+
+    // Build query to find students:
+    // 1. Students whose current database class matches assigned classes
+    // 2. Students who were in assigned classes during current academic year (based on promotion history)
+    const promotionQueries = teacher.sectionAssignments.map(({ className, section }) => ({
+      promotionHistory: {
+        $elemMatch: {
+          academicYear: currentAcademicYear,
+          promotionType: 'promoted',
+          fromClass: className,
+          fromSection: section,
+          reverted: { $ne: true }
+        }
+      }
+    }));
+
+    // Combine both queries: current class OR was in this class during current academic year
+    const combinedQueries = [
+      ...sectionQueries, // Students currently in assigned classes
+      ...promotionQueries // Students who were in assigned classes this year (before promotion)
+    ];
+
+    // Fetch students with promotion history included
+    // Use lean() for better performance, but ensure promotionHistory is included
+    const students = await Student.find({ $or: combinedQueries })
+      .select('name studentId class section parent promotionHistory')
+      .lean();
+    
+    // Debug: Log assigned classes to ensure all are included
+    console.log(`Teacher ${teacher.name} assigned to ${assignedClasses.length} class-sections:`, 
+      assignedClasses.join(', '));
+    console.log(`Found ${students.length} students across all assigned classes`);
     const studentIds = students.map((s) => s._id);
 
     const { date } = req.query;
@@ -415,14 +529,16 @@ export const getAssignedStudentsWithAttendance = async (req, res) => {
       submittedMap.set(record.student._id.toString(), true);
     });
 
+    // Since we used .lean(), students are already plain objects, no need for .toObject()
     const enrichedStudents = students.map((student) => ({
-      ...student.toObject(),
+      ...student,
       isSubmitted: submittedMap.has(student._id.toString()),
     }));
 
     res.status(200).json({
       students: enrichedStudents,
       attendance: attendanceRecords,
+      assignedClasses: assignedClasses, // Include assigned classes for frontend dropdown
     });
   } catch (error) {
     console.error("Assigned student error:", error.message);
@@ -521,6 +637,65 @@ export const getAllTeachers = async (req, res) => {
   }
 };
 
+// Helper function to get previous class teachers based on promotion history
+const getPreviousClassTeachers = async (student) => {
+  const promotionHistory = student.promotionHistory || [];
+  const currentAcademicYear = getCurrentAcademicYear();
+  
+  // Collect unique previous class-section combinations from promotion history
+  const previousClasses = new Map(); // key: "class-section", value: { class, section, academicYear }
+  
+  promotionHistory.forEach((promotion) => {
+    // Only consider non-reverted promotions
+    if (promotion.promotionType === 'promoted' && !promotion.reverted) {
+      // Store the "fromClass" as a previous class
+      const key = `${promotion.fromClass}-${promotion.fromSection}`;
+      if (!previousClasses.has(key)) {
+        previousClasses.set(key, {
+          class: promotion.fromClass,
+          section: promotion.fromSection,
+          academicYear: promotion.academicYear,
+        });
+      }
+    }
+  });
+  
+  // Fetch teachers for all previous classes
+  const previousTeachersData = [];
+  
+  for (const [key, classInfo] of previousClasses) {
+    const teachers = await Teacher.find({
+      sectionAssignments: {
+        $elemMatch: {
+          className: classInfo.class,
+          section: classInfo.section,
+        },
+      },
+    }).select("name phone email subject qualification image");
+    
+    if (teachers.length > 0) {
+      const teacherDetails = teachers.map((t) => ({
+        name: t.name,
+        phone: t.phone,
+        email: t.email,
+        subject: t.subject,
+        qualification: t.qualification,
+        image: t.image,
+        whatsappLink: t.phone ? `https://wa.me/${t.phone}` : null,
+      }));
+      
+      previousTeachersData.push({
+        class: classInfo.class,
+        section: classInfo.section,
+        academicYear: classInfo.academicYear,
+        teachers: teacherDetails,
+      });
+    }
+  }
+  
+  return previousTeachersData;
+};
+
 // ✅ Get class teacher(s) for logged-in student or parent
 export const getClassTeachersForStudent = async (req, res) => {
   try {
@@ -539,8 +714,8 @@ export const getClassTeachersForStudent = async (req, res) => {
         return res.status(404).json({ message: "Student record not found" });
       }
 
-      // Find class teachers for the student's class and section
-      const teachers = await Teacher.find({
+      // Find class teachers for the student's current class and section
+      const currentTeachers = await Teacher.find({
         sectionAssignments: {
           $elemMatch: {
             className: student.class,
@@ -549,8 +724,8 @@ export const getClassTeachersForStudent = async (req, res) => {
         },
       }).select("name phone email subject qualification image");
 
-      // Add WhatsApp links
-      const teacherDetails = teachers.map((t) => ({
+      // Add WhatsApp links for current teachers
+      const currentTeacherDetails = currentTeachers.map((t) => ({
         name: t.name,
         phone: t.phone,
         email: t.email,
@@ -560,6 +735,9 @@ export const getClassTeachersForStudent = async (req, res) => {
         whatsappLink: t.phone ? `https://wa.me/${t.phone}` : null,
       }));
 
+      // Get previous class teachers
+      const previousTeachersData = await getPreviousClassTeachers(student);
+
       return res.status(200).json({
         message: "Class teachers fetched",
         student: {
@@ -567,7 +745,8 @@ export const getClassTeachersForStudent = async (req, res) => {
           class: student.class,
           section: student.section,
         },
-        teachers: teacherDetails,
+        teachers: currentTeacherDetails,
+        previousClassTeachers: previousTeachersData,
       });
     }
 
@@ -584,10 +763,11 @@ export const getClassTeachersForStudent = async (req, res) => {
         return res.status(404).json({ message: "No children found for this parent" });
       }
 
-      // Get teachers for each child
+      // Get teachers for each child (including previous class teachers)
       const childrenWithTeachers = await Promise.all(
         children.map(async (child) => {
-          const teachers = await Teacher.find({
+          // Get current class teachers
+          const currentTeachers = await Teacher.find({
             sectionAssignments: {
               $elemMatch: {
                 className: child.class,
@@ -596,8 +776,8 @@ export const getClassTeachersForStudent = async (req, res) => {
             },
           }).select("name phone email subject qualification image");
 
-          // Add WhatsApp links
-          const teacherDetails = teachers.map((t) => ({
+          // Add WhatsApp links for current teachers
+          const currentTeacherDetails = currentTeachers.map((t) => ({
             name: t.name,
             phone: t.phone,
             email: t.email,
@@ -607,14 +787,19 @@ export const getClassTeachersForStudent = async (req, res) => {
             whatsappLink: t.phone ? `https://wa.me/${t.phone}` : null,
           }));
 
+          // Get previous class teachers
+          const previousTeachersData = await getPreviousClassTeachers(child);
+
           return {
             student: {
               _id: child._id,
               name: child.name,
               class: child.class,
               section: child.section,
+              promotionHistory: child.promotionHistory || [], // Include promotion history
             },
-            teachers: teacherDetails,
+            teachers: currentTeacherDetails,
+            previousClassTeachers: previousTeachersData,
           };
         })
       );
