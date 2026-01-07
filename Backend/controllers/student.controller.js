@@ -13,7 +13,8 @@ import FeePayment from "../models/feePayment.model.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
 import {
   getCurrentAcademicYear,
-  getAcademicYearDateRange
+  getAcademicYearDateRange,
+  getPreviousAcademicYear
 } from "../utils/academicYear.js";
 
 // Get __dirname equivalent for ES modules
@@ -81,7 +82,7 @@ export const getAllStudentsForCredentials = async (req, res) => {
   }
 };
 
-// Get unique classes and sections for filter dropdowns
+// Get unique classes, sections and academic years for filter dropdowns
 export const getUniqueValues = async (req, res) => {
   try {
     // Get unique classes
@@ -89,6 +90,21 @@ export const getUniqueValues = async (req, res) => {
     
     // Get unique sections
     const uniqueSections = await Student.distinct("section");
+
+    // Get unique academic years from students (currentAcademicYear)
+    const rawAcademicYears = await Student.distinct("currentAcademicYear");
+
+    // Filter out empty / invalid entries and sort by start year (descending)
+    const academicYears = (rawAcademicYears || [])
+      .filter((year) => typeof year === "string" && year.includes("-"))
+      .sort((a, b) => {
+        const [aStart] = a.split("-").map((y) => parseInt(y, 10));
+        const [bStart] = b.split("-").map((y) => parseInt(y, 10));
+        if (isNaN(aStart) || isNaN(bStart)) {
+          return b.localeCompare(a);
+        }
+        return bStart - aStart; // Newest first
+      });
     
     // Sort classes numerically (I, II, III, etc.)
     const sortedClasses = uniqueClasses.sort((a, b) => {
@@ -102,7 +118,8 @@ export const getUniqueValues = async (req, res) => {
     res.status(200).json({
       message: "Unique values fetched successfully",
       classes: sortedClasses,
-      sections: sortedSections
+      sections: sortedSections,
+      academicYears
     });
   } catch (error) {
     console.error("Get unique values error:", error);
@@ -112,31 +129,95 @@ export const getUniqueValues = async (req, res) => {
 
 export const getAllStudents = async (req, res) => {
   try {
-    const { class: classQuery, section, studentId, search, page = 1, limit = 10 } = req.query;
+    const { class: classQuery, section, studentId, search, academicYear, page = 1, limit = 10 } = req.query;
 
-    console.log("🔍 Backend received query params:", { classQuery, section, studentId, search, page, limit });
+    console.log("🔍 Backend received query params:", { classQuery, section, studentId, search, academicYear, page, limit });
 
-    const filter = {};
-    if (classQuery) filter.class = classQuery;
-    if (section) filter.section = section;
-    if (studentId) filter.studentId = studentId;
+    // Helper function to determine which class a student should appear in for the selected academic year
+    const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
+      const promotionHistory = student.promotionHistory || [];
+      
+      // Check if there's a revert record for this academic year (takes precedence)
+      const revertRecord = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      // Check if student was promoted IN this academic year (and not reverted)
+      const promotionInThisYear = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      if (revertRecord) {
+        return {
+          displayClass: revertRecord.toClass,
+          displaySection: revertRecord.toSection
+        };
+      }
+      
+      if (promotionInThisYear) {
+        // Student was promoted in this year - show them in their OLD class (fromClass)
+        return {
+          displayClass: promotionInThisYear.fromClass,
+          displaySection: promotionInThisYear.fromSection
+        };
+      }
+      
+      // Check if student was promoted in the PREVIOUS academic year (affects this year)
+      const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+      const revertInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      if (revertInPreviousYear) {
+        return {
+          displayClass: revertInPreviousYear.toClass,
+          displaySection: revertInPreviousYear.toSection
+        };
+      }
+      
+      const promotionInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      if (promotionInPreviousYear) {
+        // Student was promoted in previous year - show them in their NEW class (toClass) for this year
+        return {
+          displayClass: promotionInPreviousYear.toClass,
+          displaySection: promotionInPreviousYear.toSection
+        };
+      }
+      
+      // No promotion affecting this year - use current class
+      return {
+        displayClass: student.class,
+        displaySection: student.section
+      };
+    };
+
+    // Base filter (without academic year consideration)
+    const baseFilter = {};
+    if (studentId) baseFilter.studentId = studentId;
     if (search) {
-      filter.$or = [
+      baseFilter.$or = [
         { name: { $regex: search, $options: 'i' } },
         { studentId: { $regex: search, $options: 'i' } },
         { 'parent.name': { $regex: search, $options: 'i' } }
       ];
     }
 
-    console.log("🔍 Backend filter object:", filter);
+    console.log("🔍 Backend base filter object:", baseFilter);
 
     // Convert page and limit to numbers
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
 
-    // Create cache key based on filters
-    const cacheKey = cacheKeys.students.list({ class: classQuery, section, studentId, search, page: pageNum, limit: limitNum });
+    // Create cache key based on filters (include academicYear)
+    const cacheKey = cacheKeys.students.list({ class: classQuery, section, studentId, search, academicYear, page: pageNum, limit: limitNum });
 
     // Try to get from cache first
     const cachedData = await cache.get(cacheKey);
@@ -145,17 +226,91 @@ export const getAllStudents = async (req, res) => {
       return res.status(200).json(cachedData);
     }
 
+    // Get all students matching base filter (we'll filter by academic year after)
+    let allStudents = await Student.find(baseFilter)
+      .populate("parent", "name phone")
+      .lean();
+
+    // If academic year is provided, filter and transform students based on promotion history
+    if (academicYear) {
+      // Helper: check if student actually belongs to this academic year
+      const studentHasAcademicYear = (student, targetYear) => {
+        if (student.currentAcademicYear === targetYear) return true;
+        const history = student.promotionHistory || [];
+        return history.some(p => p.academicYear === targetYear);
+      };
+
+      const studentsWithDisplayClass = allStudents
+        .filter(student => studentHasAcademicYear(student, academicYear))
+        .map(student => {
+          const classInfo = getStudentClassForAcademicYear(student, academicYear);
+          return {
+            ...student,
+            displayClass: classInfo.displayClass,
+            displaySection: classInfo.displaySection
+          };
+        });
+
+      // Filter by class and section if provided (using displayClass/displaySection)
+      let filteredStudents = studentsWithDisplayClass;
+      if (classQuery) {
+        filteredStudents = filteredStudents.filter(s => s.displayClass === classQuery);
+      }
+      if (section) {
+        filteredStudents = filteredStudents.filter(s => s.displaySection === section);
+      }
+
+      // Get total count for pagination
+      const totalStudents = filteredStudents.length;
+      const totalPages = Math.ceil(totalStudents / limitNum);
+
+      // Apply pagination
+      const paginatedStudents = filteredStudents
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .slice(skip, skip + limitNum)
+        .map(student => ({
+          ...student,
+          class: student.displayClass, // Override class with displayClass
+          section: student.displaySection, // Override section with displaySection
+          originalClass: student.class, // Keep original for reference
+          originalSection: student.section
+        }));
+
+      const responseData = {
+        message: "Students fetched successfully",
+        students: paginatedStudents,
+        pagination: {
+          currentPage: pageNum,
+          totalPages,
+          totalStudents,
+          hasNextPage: pageNum < totalPages,
+          hasPrevPage: pageNum > 1,
+          limit: limitNum
+        }
+      };
+
+      // Cache the response for 5 minutes
+      await cache.set(cacheKey, responseData, 300);
+
+      return res.status(200).json(responseData);
+    }
+
+    // No academic year filter - use original logic
+    const filter = { ...baseFilter };
+    if (classQuery) filter.class = classQuery;
+    if (section) filter.section = section;
+
     // Get total count for pagination
     const totalStudents = await Student.countDocuments(filter);
     const totalPages = Math.ceil(totalStudents / limitNum);
 
-    // Get students with pagination (promotionHistory is included by default in schema)
+    // Get students with pagination
     const students = await Student.find(filter)
       .populate("parent", "name phone")
       .sort({ name: 1 })
       .skip(skip)
       .limit(limitNum)
-      .lean(); // Use lean() for better performance and to ensure all fields are included
+      .lean();
 
     console.log("🔍 Backend found students:", students.length);
     console.log("🔍 First student sample:", students[0]);

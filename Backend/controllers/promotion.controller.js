@@ -12,9 +12,6 @@ import {
   isValidAcademicYear
 } from "../utils/academicYear.js";
 
-/**
- * Get all students for promotion with attendance statistics
- */
 export const getStudentsForPromotion = async (req, res) => {
   try {
     const { academicYear, className } = req.query;

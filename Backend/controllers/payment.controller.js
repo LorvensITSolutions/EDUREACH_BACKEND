@@ -1354,13 +1354,18 @@ export const verifyOfflinePayment = async (req, res) => {
 // ✅ ADMIN: Get Pending Offline Payments
 export const getPendingOfflinePayments = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search } = req.query;
+    const { page = 1, limit = 10, search, academicYear } = req.query;
     const skip = (page - 1) * limit;
 
     let query = {
       status: "pending_verification",
       paymentMethod: "cash"
     };
+
+    // Add academic year filter if provided
+    if (academicYear) {
+      query.academicYear = academicYear;
+    }
 
     // Add search functionality
     if (search) {
