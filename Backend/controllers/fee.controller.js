@@ -228,7 +228,7 @@ export const getFeeStructureForAllChildren = async (req, res) => {
       return res.status(200).json({ success: true, children: [] });
     }
 
-    const result = await Promise.all(
+    const result = await Promise.all( 
       children.map(async (student) => {
         // Get fee structures for all academic years
         const feeStructuresByYear = await Promise.all(

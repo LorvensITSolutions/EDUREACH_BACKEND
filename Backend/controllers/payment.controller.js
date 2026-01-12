@@ -601,16 +601,10 @@ export const getAllStudentsFeeStatus = async (req, res) => {
     const today = new Date();
     const skip = (page - 1) * limit;
 
-    console.log(`\n=== Fee Status Query ===`);
-    console.log(`Academic Year Parameter: ${academicYearParam}`);
-    console.log(`Academic Year Used: ${academicYear}`);
-    console.log(`Status Filter: ${status || 'All'}`);
-    console.log(`Search: ${search || 'None'}`);
-    console.log(`Custom Fee Filter: ${customFeeFilter || 'All'}`);
+
 
     // OPTIMIZATION: Fetch all fee structures, custom fees, and payments in bulk
     const feeStructuresForYear = await FeeStructure.find({ academicYear: String(academicYear).trim() }).lean();
-    console.log(`Fee structures found for ${academicYear}: ${feeStructuresForYear.length}`);
     
     // Create a map for O(1) lookup: "class-section" -> feeStructure
     const feeStructureMap = new Map();
@@ -744,22 +738,7 @@ export const getAllStudentsFeeStatus = async (req, res) => {
         };
       }
       
-      // IMPORTANT: If we're viewing a future academic year (e.g., 2026-2027) and a student has
-      // no promotion or hold-back record for the previous year (2025-2026), this means:
-      // 
-      // 1. They were NOT promoted in 2025-2026 (no promotion record)
-      // 2. They were NOT held back in 2025-2026 (no hold-back record)
-      // 3. They might be a new student or their promotion status is unknown
-      //
-      // For fee management purposes, we should NOT show students who don't have a promotion
-      // record for the previous academic year when viewing a future academic year, because:
-      // - If they were in Class 6-C in 2025-2026 and weren't promoted, they should have a hold-back record
-      // - If they were in Class 5-C in 2025-2026 and were promoted, they should have a promotion record
-      // - If they have no record, we can't determine their class for the target academic year
-      //
-      // However, if we're viewing the current or past academic year, we can use their database class
-      // as a fallback.
-      
+ 
       // Check if we're viewing a future academic year
       const currentAcademicYear = getCurrentAcademicYear();
       const isFutureYear = targetAcademicYear > currentAcademicYear;

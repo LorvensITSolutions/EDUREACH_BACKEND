@@ -3,10 +3,87 @@ import FeeStructure from "../models/FeeStructure.model.js"; // Import your stand
 import Student from "../models/student.model.js";
 import FeePayment from "../models/feePayment.model.js";
 import Parent from "../models/parent.model.js";
+import { getPreviousAcademicYear } from "../utils/academicYear.js";
+
+// Helper function to determine student's class for a given academic year
+const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
+  const promotionHistory = student.promotionHistory || [];
+  
+  // Check if there's a revert record for this academic year (takes precedence)
+  const revertRecord = promotionHistory.find(
+    p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+  );
+  
+  // Check if student was promoted IN this academic year (and not reverted)
+  const promotionInThisYear = promotionHistory.find(
+    p => p.academicYear === targetAcademicYear && 
+         p.promotionType === 'promoted' && 
+         !p.reverted
+  );
+  
+  if (revertRecord) {
+    // Student's promotion was reverted - show them in the class they were reverted to
+    return {
+      displayClass: revertRecord.toClass,
+      displaySection: revertRecord.toSection
+    };
+  }
+  
+  if (promotionInThisYear) {
+    // Student was promoted in this year (and not reverted) - show them in their OLD class (fromClass)
+    return {
+      displayClass: promotionInThisYear.fromClass,
+      displaySection: promotionInThisYear.fromSection
+    };
+  }
+  
+  // Check if student was promoted in the PREVIOUS academic year (affects this year)
+  const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+  const revertInPreviousYear = promotionHistory.find(
+    p => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+  );
+  
+  if (revertInPreviousYear) {
+    // Promotion was reverted in previous year - show them in the class they were reverted to
+    return {
+      displayClass: revertInPreviousYear.toClass,
+      displaySection: revertInPreviousYear.toSection
+    };
+  }
+  
+  const promotionInPreviousYear = promotionHistory.find(
+    p => p.academicYear === previousAcademicYear && 
+         p.promotionType === 'promoted' && 
+         !p.reverted
+  );
+  
+  if (promotionInPreviousYear) {
+    // Student was promoted in previous year (and not reverted) - show them in their NEW class (toClass) for this year
+    return {
+      displayClass: promotionInPreviousYear.toClass,
+      displaySection: promotionInPreviousYear.toSection
+    };
+  }
+  
+  // No promotion affecting this year - use current class
+  return {
+    displayClass: student.class,
+    displaySection: student.section
+  };
+};
 
 export const createOrUpdateCustomFee = async (req, res) => {
   try {
     const { student, academicYear, totalFee, breakdown, frequency, dueDate, lateFeePerDay, reason, className, section } = req.body;
+console.log("createOrUpdateCustomFee",req.body);
+    // Validate required fields
+    if (!student) {
+      return res.status(400).json({ success: false, message: "Student ID is required." });
+    }
+
+    if (!academicYear) {
+      return res.status(400).json({ success: false, message: "Academic year is required." });
+    }
 
     if (!breakdown || typeof breakdown !== "object" || Object.keys(breakdown).length === 0) {
       return res.status(400).json({ success: false, message: "Breakdown must have at least one fee component." });
@@ -21,12 +98,66 @@ export const createOrUpdateCustomFee = async (req, res) => {
       });
     }
 
+    // Always fetch student to get the correct class for this academic year (handles promotions)
+    let classToUse = className;
+    let sectionToUse = section;
+
+    try {
+      const studentDoc = await Student.findById(student).select('class section promotionHistory').lean();
+      if (!studentDoc) {
+        return res.status(404).json({ success: false, message: "Student not found." });
+      }
+
+      // Get the correct class for this academic year based on promotion history
+      const classInfo = getStudentClassForAcademicYear(studentDoc, academicYear);
+      
+      // Use provided className/section if available, otherwise use calculated class
+      // But validate that provided class matches calculated class for this academic year
+      if (classInfo.displayClass && classInfo.displaySection) {
+        // If className/section were provided, verify they match the calculated class
+        if (classToUse && sectionToUse) {
+          // Allow if they match, or if they're close (case-insensitive)
+          if (classToUse.toLowerCase() !== classInfo.displayClass.toLowerCase() || 
+              sectionToUse.toLowerCase() !== classInfo.displaySection.toLowerCase()) {
+            console.warn(`Class mismatch: Provided ${classToUse}-${sectionToUse}, but calculated ${classInfo.displayClass}-${classInfo.displaySection} for academic year ${academicYear}`);
+          }
+        }
+        // Always use the calculated class to ensure consistency
+        classToUse = classInfo.displayClass;
+        sectionToUse = classInfo.displaySection;
+      } else {
+        // Fallback to student's current class if no promotion history
+        classToUse = classToUse || studentDoc.class;
+        sectionToUse = sectionToUse || studentDoc.section;
+      }
+    } catch (err) {
+      console.error("Error fetching student:", err);
+      return res.status(500).json({ 
+        success: false, 
+        message: "Error fetching student information. Please try again." 
+      });
+    }
+
+    // Validate that we have class and section
+    if (!classToUse || !sectionToUse) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Cannot determine class and section for student in academic year ${academicYear}. Please ensure the student is promoted to this academic year.` 
+      });
+    }
+
     // 🔍 1. Get the standard fee structure for the student's class
-    const standard = await FeeStructure.findOne({
-      class: className,
-      section,
-      academicYear,
-    });
+    let standard = null;
+    try {
+      standard = await FeeStructure.findOne({
+        class: classToUse,
+        section: sectionToUse,
+        academicYear: String(academicYear).trim(),
+      });
+    } catch (err) {
+      console.error("Error fetching standard fee structure:", err);
+      // Continue even if standard fee lookup fails
+    }
 
     let discount = null;
     if (standard) {
@@ -35,23 +166,64 @@ export const createOrUpdateCustomFee = async (req, res) => {
     }
 
     // 💾 2. Save or update custom fee
-    const updated = await CustomFee.findOneAndUpdate(
-      { student, academicYear },
-      { totalFee, breakdown, frequency, dueDate, lateFeePerDay, reason },
-      { new: true, upsert: true }
-    );
+    try {
+      const updated = await CustomFee.findOneAndUpdate(
+        { student, academicYear: String(academicYear).trim() },
+        { 
+          totalFee, 
+          breakdown, 
+          frequency, 
+          dueDate, 
+          lateFeePerDay, 
+          reason 
+        },
+        { new: true, upsert: true }
+      );
 
-    res.status(200).json({
-      success: true,
-      message: "Custom fee saved",
-      data: updated,
-      originalFee: standard?.totalFee || null,
-      discount: discount !== null ? discount : null,
-    });
+      res.status(200).json({
+        success: true,
+        message: "Custom fee saved",
+        data: updated,
+        originalFee: standard?.totalFee || null,
+        discount: discount !== null ? discount : null,
+      });
+    } catch (dbError) {
+      console.error("Database error saving custom fee:", dbError);
+      console.error("Student ID:", student);
+      console.error("Academic Year:", academicYear);
+      console.error("Class:", classToUse, "Section:", sectionToUse);
+      
+      // Check if it's a duplicate key error
+      if (dbError.code === 11000) {
+        // Check if it's the old index issue (unique on student only)
+        if (dbError.keyPattern && dbError.keyPattern.student && !dbError.keyPattern.academicYear) {
+          console.error("⚠️ Database index issue: Old unique index on 'student' only detected.");
+          console.error("⚠️ Please run the migration script to fix the database index.");
+          return res.status(500).json({ 
+            success: false, 
+            message: "Database configuration error. Please contact administrator. The system needs to allow multiple custom fees per student (one per academic year)." 
+          });
+        }
+        
+        // Normal duplicate key error (shouldn't happen with upsert, but handle it)
+        return res.status(400).json({ 
+          success: false, 
+          message: "Custom fee already exists for this student and academic year." 
+        });
+      }
+      
+      throw dbError; // Re-throw to be caught by outer catch
+    }
 
   } catch (err) {
     console.error("Custom fee error:", err);
-    res.status(500).json({ success: false, message: "Failed to save custom fee" });
+    console.error("Error stack:", err.stack);
+    console.error("Request body:", JSON.stringify(req.body, null, 2));
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to save custom fee",
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };
 
@@ -61,7 +233,7 @@ export const getAllCustomFees = async (req, res) => {
     const customFees = await CustomFee.find()
       .populate({
         path: 'student',
-        select: 'name studentId class section parent',
+        select: 'name studentId class section parent promotionHistory',
         populate: {
           path: 'parent',
           select: 'name phone email'
@@ -81,15 +253,20 @@ export const getAllCustomFees = async (req, res) => {
         const studentId = customFee.student._id || customFee.student;
         const student = customFee.student;
         
-        // Get the standard fee structure for comparison
+        // Get the correct class for this academic year (not the current class)
+        const classInfo = getStudentClassForAcademicYear(student, customFee.academicYear);
+        const displayClass = classInfo.displayClass;
+        const displaySection = classInfo.displaySection;
+        
+        // Get the standard fee structure for comparison using the correct class for this academic year
         let standardFee = null;
         let actualFee = null;
         let discount = null;
         
-        if (student && student.class && student.section) {
+        if (displayClass && displaySection) {
           standardFee = await FeeStructure.findOne({
-            class: student.class,
-            section: student.section,
+            class: displayClass,
+            section: displaySection,
             academicYear: customFee.academicYear,
           });
           
@@ -200,7 +377,10 @@ export const getAllCustomFees = async (req, res) => {
             breakdown: standardBreakdown
           } : null,
           discount: discount !== null ? discount : null,
-          hasDiscount: discount !== null && discount > 0
+          hasDiscount: discount !== null && discount > 0,
+          // Add display class and section for this academic year
+          displayClass: displayClass,
+          displaySection: displaySection
         };
       })
     );
