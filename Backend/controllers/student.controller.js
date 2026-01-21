@@ -136,11 +136,12 @@ export const getAllStudents = async (req, res) => {
     // Helper function to determine which class a student should appear in for the selected academic year
     const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
       const promotionHistory = student.promotionHistory || [];
-      
+      console.log("Promotion history:", promotionHistory);
       // Check if there's a revert record for this academic year (takes precedence)
       const revertRecord = promotionHistory.find(
         p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
       );
+      console.log("Revert record:", revertRecord);
       
       // Check if student was promoted IN this academic year (and not reverted)
       const promotionInThisYear = promotionHistory.find(
@@ -208,6 +209,20 @@ export const getAllStudents = async (req, res) => {
         { 'parent.name': { $regex: search, $options: 'i' } }
       ];
     }
+    
+    // For future academic years, exclude graduated students from base query
+    if (academicYear) {
+      const currentAcadYear = getCurrentAcademicYear();
+      const currentStartYear = parseInt(currentAcadYear.split('-')[0]);
+      const selectedStartYear = parseInt(academicYear.split('-')[0]);
+      const isFutureAcademicYear = selectedStartYear > currentStartYear;
+      
+      if (isFutureAcademicYear) {
+        // Exclude graduated students from base query for future years
+        baseFilter.status = { $ne: 'graduated' };
+        baseFilter.class = { $nin: ['Graduated', 'graduated'] };
+      }
+    }
 
     console.log("🔍 Backend base filter object:", baseFilter);
 
@@ -219,11 +234,21 @@ export const getAllStudents = async (req, res) => {
     // Create cache key based on filters (include academicYear)
     const cacheKey = cacheKeys.students.list({ class: classQuery, section, studentId, search, academicYear, page: pageNum, limit: limitNum });
 
-    // Try to get from cache first
-    const cachedData = await cache.get(cacheKey);
-    if (cachedData) {
-      console.log('📦 Serving students from cache');
-      return res.status(200).json(cachedData);
+    // Check if viewing future academic year - skip cache for future years to ensure latest promotion data
+    const currentAcadYear = getCurrentAcademicYear();
+    const currentStartYear = parseInt(currentAcadYear.split('-')[0]);
+    const selectedStartYear = academicYear ? parseInt(academicYear.split('-')[0]) : null;
+    const isFutureYear = selectedStartYear && selectedStartYear > currentStartYear;
+    
+    // Try to get from cache first (only for current/past years)
+    if (!isFutureYear) {
+      const cachedData = await cache.get(cacheKey);
+      if (cachedData) {
+        console.log('📦 Serving students from cache');
+        return res.status(200).json(cachedData);
+      }
+    } else {
+      console.log('📦 Skipping cache for future academic year to ensure latest promotion data');
     }
 
     // Get all students matching base filter (we'll filter by academic year after)
@@ -233,15 +258,109 @@ export const getAllStudents = async (req, res) => {
 
     // If academic year is provided, filter and transform students based on promotion history
     if (academicYear) {
-      // Helper: check if student actually belongs to this academic year
-      const studentHasAcademicYear = (student, targetYear) => {
-        if (student.currentAcademicYear === targetYear) return true;
+      // Check if viewing future academic year (only show students with promotion/hold-back records)
+      const currentStartYear = parseInt(currentAcadYear.split('-')[0]);
+      const selectedStartYear = parseInt(academicYear.split('-')[0]);
+      const isFutureAcademicYear = selectedStartYear > currentStartYear;
+      
+      console.log(`📊 Student Filter - Academic Year: ${academicYear}, Current: ${currentAcadYear}, Is Future: ${isFutureAcademicYear}`);
+      console.log(`📊 Academic Year Comparison - Current Start: ${currentStartYear}, Selected Start: ${selectedStartYear}, Is Future: ${isFutureAcademicYear}`);
+      
+      // Helper: check if student should be included for this academic year
+      // This logic matches the promotion controller's wasPromoted logic exactly
+      const studentBelongsToAcademicYear = (student, targetYear) => {
+        // For current or past academic years, include all students (they all existed during those years)
+        if (!isFutureAcademicYear) {
+          return true;
+        }
+        
+        // For future academic years, ONLY include students who were promoted/hold-back in the previous year
         const history = student.promotionHistory || [];
-        return history.some(p => p.academicYear === targetYear);
+        
+        // If student has no promotion history at all, exclude them from future years
+        if (!history || history.length === 0) {
+          return false;
+        }
+        
+        const previousAcademicYear = getPreviousAcademicYear(targetYear);
+        
+        // Get ALL records for the previous academic year (sorted by date if available)
+        const recordsForPreviousYear = history.filter(
+          p => p.academicYear === previousAcademicYear
+        );
+        
+        // If no records for previous year, exclude student
+        if (recordsForPreviousYear.length === 0) {
+          return false;
+        }
+        
+        // Check if there's a revert record for the previous academic year (takes precedence)
+        const revertInPreviousYear = recordsForPreviousYear.find(
+          p => p.promotionType === 'reverted'
+        );
+        
+        if (revertInPreviousYear) {
+          // Promotion was reverted - student should appear in the class they were reverted to
+          return true;
+        }
+        
+        // Check if student was promoted in the previous academic year (and not reverted)
+        // IMPORTANT: Check that reverted is NOT true (explicitly check for !== true)
+        const promotionInPreviousYear = recordsForPreviousYear.find(
+          p => p.promotionType === 'promoted' && 
+               (p.reverted !== true) // Explicitly check for !== true (handles undefined, null, false)
+        );
+        
+        // Check if student was graduated in the previous academic year
+        // If they graduated, they should NOT appear in future academic years
+        const graduatedInPreviousYear = promotionInPreviousYear && 
+          (promotionInPreviousYear.toClass === 'Graduated' || 
+           promotionInPreviousYear.toClass === 'graduated');
+        
+        // Also check student's current status
+        const isGraduated = student.status === 'graduated' || 
+                           student.class === 'Graduated' || 
+                           student.class === 'graduated';
+        
+        // Exclude if student was graduated in previous year or is currently graduated
+        if (graduatedInPreviousYear || isGraduated) {
+          return false;
+        }
+        
+        // They remain in the current academic year until they are promoted
+        const wasPromoted = promotionInPreviousYear !== undefined;
+        
+        // Include ONLY if student was promoted in previous year (matching promotion controller)
+        // AND they were not graduated
+        const shouldInclude = wasPromoted && !graduatedInPreviousYear;
+        
+        // Debug: Log if student is being incorrectly included/excluded
+        if (!shouldInclude && recordsForPreviousYear.length > 0) {
+          const reason = graduatedInPreviousYear || isGraduated 
+            ? 'Graduated in previous year' 
+            : 'No valid promotion record';
+          console.log(`⚠️ Student ${student.studentId} (${student.name}) excluded from ${targetYear}: ${reason}`, {
+            previousAcademicYear,
+            graduatedInPreviousYear,
+            isGraduated,
+            recordsForPreviousYear: recordsForPreviousYear.map(p => ({
+              promotionType: p.promotionType,
+              toClass: p.toClass,
+              reverted: p.reverted,
+              academicYear: p.academicYear
+            }))
+          });
+        }
+        
+        return shouldInclude;
       };
 
+      // Filter students based on academic year
       const studentsWithDisplayClass = allStudents
-        .filter(student => studentHasAcademicYear(student, academicYear))
+        .filter(student => {
+          const belongs = studentBelongsToAcademicYear(student, academicYear);
+          return belongs;
+        })
         .map(student => {
           const classInfo = getStudentClassForAcademicYear(student, academicYear);
           return {
@@ -250,6 +369,76 @@ export const getAllStudents = async (req, res) => {
             displaySection: classInfo.displaySection
           };
         });
+      
+      // Debug: Log students being included for future years (after studentsWithDisplayClass is created)
+      if (isFutureAcademicYear && studentsWithDisplayClass.length <= 30) {
+        const previousAcademicYear = getPreviousAcademicYear(academicYear);
+        studentsWithDisplayClass.forEach(student => {
+          const history = student.promotionHistory || [];
+          const recordsForPreviousYear = history.filter(
+            p => p.academicYear === previousAcademicYear
+          );
+          const promotionInPreviousYear = recordsForPreviousYear.find(
+            p => p.promotionType === 'promoted' && 
+                 (p.reverted !== true)
+          );
+          
+          if (!promotionInPreviousYear) {
+            console.log(`⚠️ WARNING: Student ${student.studentId} (${student.name}) included in ${academicYear} but has no valid promotion record for ${previousAcademicYear}`);
+            console.log(`   Records for previous year:`, recordsForPreviousYear.map(p => ({
+              promotionType: p.promotionType,
+              reverted: p.reverted
+            })));
+          }
+        });
+      }
+      
+      console.log(`📊 Student Filter - Total students: ${allStudents.length}, Filtered for ${academicYear}: ${studentsWithDisplayClass.length}`);
+      if (isFutureAcademicYear) {
+        const previousAcademicYear = getPreviousAcademicYear(academicYear);
+        console.log(`📊 Future year filter: Only showing students with promotion/hold-back records for ${academicYear}`);
+        console.log(`📊 Previous academic year: ${previousAcademicYear}`);
+        
+        // Count students with valid records for debugging (using EXACT same logic as filter)
+        const studentsWithRecords = allStudents.filter(student => {
+          const history = student.promotionHistory || [];
+          if (!history || history.length === 0) return false;
+          
+          const recordsForPreviousYear = history.filter(
+            p => p.academicYear === previousAcademicYear
+          );
+          
+          if (recordsForPreviousYear.length === 0) return false;
+          
+          const revertInPreviousYear = recordsForPreviousYear.find(
+            p => p.promotionType === 'reverted'
+          );
+          if (revertInPreviousYear) return true;
+          
+          const promotionInPreviousYear = recordsForPreviousYear.find(
+            p => p.promotionType === 'promoted' && 
+                 (p.reverted !== true)
+          );
+          
+          // Only include promoted students (matching promotion controller)
+          return promotionInPreviousYear !== undefined;
+        });
+        
+        const promotedCount = allStudents.filter(student => {
+          const history = student.promotionHistory || [];
+          const recordsForPreviousYear = history.filter(
+            p => p.academicYear === previousAcademicYear
+          );
+          const promotionInPreviousYear = recordsForPreviousYear.find(
+            p => p.promotionType === 'promoted' && 
+                 (p.reverted !== true)
+          );
+          return promotionInPreviousYear !== undefined;
+        }).length;
+        
+        console.log(`📊 Students with valid promotion records for ${academicYear}: ${studentsWithRecords.length}`);
+        console.log(`📊 Promoted students from ${previousAcademicYear}: ${promotedCount}`);
+      }
 
       // Filter by class and section if provided (using displayClass/displaySection)
       let filteredStudents = studentsWithDisplayClass;

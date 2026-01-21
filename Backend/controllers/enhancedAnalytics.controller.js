@@ -112,8 +112,119 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
     const lastMonth = new Date(currentYear, currentMonth - 1, 1);
     const endOfLastMonth = new Date(currentYear, currentMonth, 0);
 
-    // 📈 BASIC COUNTS
-    const totalStudents = await Student.countDocuments();
+    // 📈 BASIC COUNTS - Filter by academic year (matching student controller logic)
+    // Check if viewing future academic year
+    const currentAcadYear = getCurrentAcademicYear();
+    const currentStartYear = parseInt(currentAcadYear.split('-')[0]);
+    const selectedStartYear = parseInt(academicYear.split('-')[0]);
+    const isFutureAcademicYear = selectedStartYear > currentStartYear;
+    
+    // Helper function to check if student belongs to academic year (EXACT match with student controller)
+    const studentBelongsToAcademicYear = (student, targetYear) => {
+      // For current or past academic years, include all students (they all existed during those years)
+      if (!isFutureAcademicYear) {
+        return true;
+      }
+      
+      // For future academic years, ONLY include students who were promoted in the previous year
+      const history = student.promotionHistory || [];
+      
+      // If student has no promotion history at all, exclude them from future years
+      if (!history || history.length === 0) {
+        return false;
+      }
+      
+      const previousAcademicYear = getPreviousAcademicYear(targetYear);
+      
+      // Get ALL records for the previous academic year
+      const recordsForPreviousYear = history.filter(
+        p => p.academicYear === previousAcademicYear
+      );
+      
+      // If no records for previous year, exclude student
+      if (recordsForPreviousYear.length === 0) {
+        return false;
+      }
+      
+      // Check if there's a revert record for the previous academic year (takes precedence)
+      const revertInPreviousYear = recordsForPreviousYear.find(
+        p => p.promotionType === 'reverted'
+      );
+      
+      if (revertInPreviousYear) {
+        // Promotion was reverted - student should appear in the class they were reverted to
+        return true;
+      }
+      
+      // Check if student was promoted in the previous academic year (and not reverted)
+      // IMPORTANT: Check that reverted is NOT true (explicitly check for !== true)
+      const promotionInPreviousYear = recordsForPreviousYear.find(
+        p => p.promotionType === 'promoted' && 
+             (p.reverted !== true) // Explicitly check for !== true (handles undefined, null, false)
+      );
+      
+      // Check if student was graduated in the previous academic year
+      // If they graduated, they should NOT appear in future academic years
+      const graduatedInPreviousYear = promotionInPreviousYear && 
+        (promotionInPreviousYear.toClass === 'Graduated' || 
+         promotionInPreviousYear.toClass === 'graduated');
+      
+      // Also check student's current status
+      const isGraduated = student.status === 'graduated' || 
+                         student.class === 'Graduated' || 
+                         student.class === 'graduated';
+      
+      // Exclude if student was graduated in previous year or is currently graduated
+      if (graduatedInPreviousYear || isGraduated) {
+        return false;
+      }
+      
+      // They remain in the current academic year until they are promoted
+      const wasPromoted = promotionInPreviousYear !== undefined;
+      
+      // Include ONLY if student was promoted in previous year (matching promotion controller)
+      // AND they were not graduated
+      const shouldInclude = wasPromoted && !graduatedInPreviousYear;
+      
+      return shouldInclude;
+    };
+    
+    // Count students based on academic year (matching student controller logic exactly)
+    // Apply base filter first (matching student controller lines 202-225)
+    const baseFilter = {};
+    
+    // For future academic years, exclude graduated students from base query (matching student controller)
+    if (isFutureAcademicYear) {
+      baseFilter.status = { $ne: 'graduated' };
+      baseFilter.class = { $nin: ['Graduated', 'graduated'] };
+    }
+    
+    // Fetch students with base filter (matching student controller approach)
+    const studentsForCount = await Student.find(baseFilter).lean();
+    
+    // Apply academic year filtering (matching student controller lines 359-371 exactly)
+    let totalStudents = 0;
+    let totalEnrolledStudents = 0;
+    
+    if (isFutureAcademicYear) {
+      // For future years, filter using the same logic as student controller
+      const filteredStudents = studentsForCount.filter(student => 
+        studentBelongsToAcademicYear(student, academicYear)
+      );
+      console.log("filteredStudents", filteredStudents);
+      totalStudents = filteredStudents.length;
+      totalEnrolledStudents = filteredStudents.length;
+      console.log(`📊 Future year ${academicYear}: Filtered ${totalStudents} students from ${studentsForCount.length} total (after base filter)`);
+    } else {
+      // For current/past years, studentBelongsToAcademicYear returns true for all
+      // So all students from baseFilter are included (matching student controller exactly)
+      // The student controller doesn't exclude graduated students for current/past years
+      console.log("📊 Current/past year students:", studentsForCount);
+      totalStudents = studentsForCount.length;
+      totalEnrolledStudents = studentsForCount.length;
+      console.log(`📊 Current/past year ${academicYear}: Total students: ${totalStudents} (matching student table)`);
+    }
+    
     const totalTeachers = await Teacher.countDocuments();
     const totalParents = await Parent.countDocuments();
 
@@ -139,10 +250,7 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
     const currentDate = targetDate;
     const { start: startOfDay, end: endOfDay } = getUtcDayRange(currentDate);
     
-   
-
-    // Get total enrolled students count (all classes and sections)
-    const totalEnrolledStudents = await Student.countDocuments();
+    // totalEnrolledStudents is already calculated above based on academic year
     
     // Get today's student attendance records
     const todayStudentAttendance = await Attendance.aggregate([
@@ -340,84 +448,68 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
       return student.class;
     };
 
-    // Check if viewing future academic year (only show students with promotion/hold-back records)
-    const currentAcadYear = getCurrentAcademicYear();
-    // Compare academic years by extracting start year
-    const currentStartYear = parseInt(currentAcadYear.split('-')[0]);
-    const selectedStartYear = parseInt(academicYear.split('-')[0]);
-    const isFutureAcademicYear = selectedStartYear > currentStartYear;
+    // Use the same variables already declared above for academic year filtering
+    // currentAcadYear, currentStartYear, selectedStartYear, and isFutureAcademicYear are already defined
     
     console.log(`📊 StudentsByClass - Academic Year: ${academicYear}, Current: ${currentAcadYear}, Is Future: ${isFutureAcademicYear}`);
     
-    // Fetch all students
-    const allStudents = await Student.find({}).lean();
-    console.log(`📊 Total students in database: ${allStudents.length}`);
+    // Apply the same base filter as total students count (matching student controller)
+    const baseFilterForChart = {};
+    if (isFutureAcademicYear) {
+      baseFilterForChart.status = { $ne: 'graduated' };
+      baseFilterForChart.class = { $nin: ['Graduated', 'graduated'] };
+    }
+    
+    // Fetch students with base filter (matching the approach used for total count)
+    const allStudentsForChart = await Student.find(baseFilterForChart).lean();
+    console.log(`📊 Total students in database (after base filter): ${allStudentsForChart.length}`);
     
     // Process students and determine their display class for the selected academic year
-    const studentsWithDisplayClass = allStudents.map(student => {
-      const displayClass = getStudentClassForAcademicYear(student, academicYear);
-      const promotionHistory = student.promotionHistory || [];
-      
-      // Check if student has any promotion/hold-back record for the previous academic year
-      // (which would affect their class in the selected academic year)
-      const previousAcademicYear = getPreviousAcademicYear(academicYear);
-      const hasRecordForPreviousYear = promotionHistory.some(
-        p => p.academicYear === previousAcademicYear && 
-             (p.promotionType === 'promoted' || p.promotionType === 'hold-back') &&
-             !p.reverted
-      );
-      
-      // Check if student has a promotion/hold-back record directly in the selected academic year
-      const hasRecordForSelectedYear = promotionHistory.some(
-        p => p.academicYear === academicYear && 
-             (p.promotionType === 'promoted' || p.promotionType === 'hold-back') &&
-             !p.reverted
-      );
-      
-      return {
-        student,
-        displayClass,
-        hasRecordForPreviousYear,
-        hasRecordForSelectedYear
-      };
-    });
-    
-    // If viewing future academic year, ONLY show students who have promotion/hold-back records
-    let filteredStudents = studentsWithDisplayClass;
-    if (isFutureAcademicYear) {
-      filteredStudents = studentsWithDisplayClass.filter(item => {
-        // For future years, student must have a promotion/hold-back record in the previous year
-        // OR a promotion/hold-back record in the selected year itself
-        return item.hasRecordForPreviousYear || item.hasRecordForSelectedYear;
+    // Use the SAME studentBelongsToAcademicYear function for filtering
+    const studentsWithDisplayClass = allStudentsForChart
+      .filter(student => {
+        // Use the same filtering logic as total students count
+        return studentBelongsToAcademicYear(student, academicYear);
+      })
+      .map(student => {
+        const displayClass = getStudentClassForAcademicYear(student, academicYear);
+        return {
+          student,
+          displayClass
+        };
       });
-      console.log(`📊 Filtered to ${filteredStudents.length} students with promotion records for future academic year ${academicYear} (from ${allStudents.length} total students)`);
-    } else {
-      // For current or past academic years, show all students
-      console.log(`📊 Showing all ${filteredStudents.length} students for academic year ${academicYear}`);
-    }
+    
+    console.log(`📊 StudentsByClass - Filtered ${studentsWithDisplayClass.length} students for academic year ${academicYear}`);
     
     // Group by display class
     const studentsByClassMap = new Map();
-    filteredStudents.forEach(({ displayClass }) => {
+    studentsWithDisplayClass.forEach(({ displayClass }) => {
       const count = studentsByClassMap.get(displayClass) || 0;
       studentsByClassMap.set(displayClass, count + 1);
     });
     
-    // Convert to array format
+    // Convert to array format with name/value structure (matching frontend expectations)
     const studentsByClass = Array.from(studentsByClassMap.entries())
-      .map(([_id, count]) => ({ _id, count }))
+      .map(([className, count]) => ({ 
+        name: `Class ${className}`, 
+        value: count 
+      }))
       .sort((a, b) => {
+        // Extract class name from "Class X" format
+        const aClass = a.name.replace('Class ', '');
+        const bClass = b.name.replace('Class ', '');
+        
         // Sort: Nursery, LKG, then numeric classes
         const classOrder = { 'Nursery': 1, 'LKG': 2, 'UKG': 3 };
-        const aOrder = classOrder[a._id];
-        const bOrder = classOrder[b._id];
+        const aOrder = classOrder[aClass];
+        const bOrder = classOrder[bClass];
         if (aOrder !== undefined && bOrder !== undefined) return aOrder - bOrder;
         if (aOrder !== undefined) return -1;
         if (bOrder !== undefined) return 1;
-        const aNum = parseInt(a._id);
-        const bNum = parseInt(b._id);
+        const aNum = parseInt(aClass);
+        const bNum = parseInt(bClass);
         if (!isNaN(aNum) && !isNaN(bNum)) return aNum - bNum;
-        return String(a._id).localeCompare(String(b._id));
+        return String(aClass).localeCompare(String(bClass));
       });
 
     // Validate studentsByClass data
@@ -582,11 +674,7 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
         avgTeacherAttendance: 95
       },
       charts: {
-        studentsByClass: validatedStudentsByClass.map(item => ({
-          name: `Grade ${item._id}`,
-          count: item.count,
-          value: item.count
-        })),
+        studentsByClass: validatedStudentsByClass, // Already in correct format { name, value }
         studentsBySection: [],
         admissionTrends: [],
         attendanceSummary: [],
@@ -653,15 +741,7 @@ export const getRealTimeDashboardUpdates = async (req, res) => {
       });
     }
     
-    console.log('⚡ Generating fresh real-time updates data');
-
-    console.log("=== REAL-TIME UPDATES DEBUG ===");
-    console.log("Requested Date:", date);
-    console.log("Target Date:", targetDate.toLocaleString());
-    console.log("Start of Day (Local):", startOfDay);
-    console.log("End of Day (Local):", endOfDay);
-    console.log("Start of Day (UTC):", startOfDay.toISOString());
-    console.log("End of Day (UTC):", endOfDay.toISOString());
+   
 
     // Real-time metrics
     const recentPayments = await FeePayment.countDocuments({
@@ -758,7 +838,6 @@ export const getRealTimeDashboardUpdates = async (req, res) => {
 
     // Cache the response data for 1 minute (60 seconds) - shorter TTL for real-time data
     await cache.set(cacheKey, responseData, 60);
-    console.log('⚡ Real-time updates data cached successfully');
 
     res.status(200).json({
       success: true,
