@@ -2,6 +2,7 @@ import Attendance from '../models/attendance.model.js';
 import Student from '../models/student.model.js';
 import Teacher from '../models/teacher.model.js';
 import Parent from "../models/parent.model.js";
+import Holiday from '../models/holiday.model.js';
 import xlsx from 'xlsx'; 
 import { sendAbsenceAlertEmail } from '../utils/emailService.js'; // Nodemailer utility
 import PDFDocument from 'pdfkit';
@@ -11,6 +12,7 @@ export const markAttendance = async (req, res) => {
     const { attendanceData } = req.body;
     const records = [];
     const skippedStudents = [];
+    const holidayDates = []; // Track dates that are holidays
 
     const groupedByDate = {}; // Prevent querying DB repeatedly for same student/date combo
 
@@ -38,6 +40,27 @@ export const markAttendance = async (req, res) => {
       const dayStart = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
       const dayEnd = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
       const key = `${studentId}-${dayStart.toISOString()}`;
+
+      // Check if this date is a Sunday (0 = Sunday)
+      const dayOfWeek = dayStart.getUTCDay();
+      const isSunday = dayOfWeek === 0;
+
+      // Check if this date is a holiday in database
+      const holiday = await Holiday.findOne({
+        date: { $gte: dayStart, $lt: new Date(dayStart.getTime() + 24 * 60 * 60 * 1000) },
+        isActive: true
+      });
+
+      // Skip marking attendance for Sundays or holidays
+      if (isSunday || holiday) {
+        holidayDates.push({
+          date: dayStart.toISOString().slice(0, 10),
+          holidayName: isSunday ? 'Sunday' : holiday.name,
+          studentId,
+          isSunday: isSunday || false
+        });
+        continue;
+      }
 
       if (groupedByDate[key]) {
         skippedStudents.push(studentId); // already processed in this request
@@ -105,6 +128,10 @@ export const markAttendance = async (req, res) => {
       message: records.length > 0 ? "Attendance updated successfully" : "No changes made",
       count: records.length,
       skippedStudents,
+      skippedHolidays: holidayDates.length > 0 ? holidayDates : undefined,
+      warning: holidayDates.length > 0 
+        ? `Attendance cannot be marked for ${holidayDates.length} date(s) as they are holidays.`
+        : undefined
     });
   } catch (error) {
     console.error("Error marking attendance:", error);

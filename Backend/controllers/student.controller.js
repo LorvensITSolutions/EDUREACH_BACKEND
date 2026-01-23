@@ -209,7 +209,7 @@ export const getAllStudents = async (req, res) => {
         { 'parent.name': { $regex: search, $options: 'i' } }
       ];
     }
-    
+
     // For future academic years, exclude graduated students from base query
     if (academicYear) {
       const currentAcadYear = getCurrentAcademicYear();
@@ -242,10 +242,10 @@ export const getAllStudents = async (req, res) => {
     
     // Try to get from cache first (only for current/past years)
     if (!isFutureYear) {
-      const cachedData = await cache.get(cacheKey);
-      if (cachedData) {
-        console.log('📦 Serving students from cache');
-        return res.status(200).json(cachedData);
+    const cachedData = await cache.get(cacheKey);
+    if (cachedData) {
+      console.log('📦 Serving students from cache');
+      return res.status(200).json(cachedData);
       }
     } else {
       console.log('📦 Skipping cache for future academic year to ensure latest promotion data');

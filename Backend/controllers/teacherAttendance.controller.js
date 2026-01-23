@@ -1,6 +1,7 @@
 import TeacherAttendance from "../models/TeacherAttendance.js";
 import Teacher from "../models/teacher.model.js";
 import User from "../models/user.model.js";
+import Holiday from "../models/holiday.model.js";
 
 // ===========================================
 // ADMIN FUNCTIONS (Manage All Teachers' Attendance)
@@ -14,9 +15,11 @@ export const markTeacherAttendance = async (req, res) => {
     const skippedTeachers = [];
 
     const groupedByDate = {}; // Prevent querying DB repeatedly for same teacher/date combo
+    const holidayDates = []; // Track dates that are holidays
 
     for (let record of attendanceData) {
       const { teacherId, status, reason, date } = record;
+      
       // Parse date and store at UTC noon to avoid timezone issues
       // When date is "2025-11-08", store it as 2025-11-08 12:00:00 UTC
       // This ensures the date is always stored as the correct calendar day regardless of timezone
@@ -40,6 +43,28 @@ export const markTeacherAttendance = async (req, res) => {
         dayStart = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
         dayEnd = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
       }
+      
+      // Check if this date is a Sunday (0 = Sunday)
+      const dayOfWeek = dateToStore.getUTCDay();
+      const isSunday = dayOfWeek === 0;
+      
+      // Check if this date is a holiday in database
+      const holiday = await Holiday.findOne({
+        date: { $gte: dayStart, $lt: new Date(dayStart.getTime() + 24 * 60 * 60 * 1000) },
+        isActive: true
+      });
+      
+      // Skip marking attendance for Sundays or holidays
+      if (isSunday || holiday) {
+        holidayDates.push({
+          date: date || dateToStore.toISOString().slice(0, 10),
+          holidayName: isSunday ? 'Sunday' : holiday.name,
+          teacherId,
+          isSunday: isSunday || false
+        });
+        continue;
+      }
+      
       const key = `${teacherId}-${dateToStore.toISOString()}`;
 
       if (groupedByDate[key]) {
@@ -122,6 +147,10 @@ export const markTeacherAttendance = async (req, res) => {
       message: records.length > 0 ? "Attendance updated successfully" : "No changes made",
       count: records.length,
       skippedTeachers,
+      skippedHolidays: holidayDates.length > 0 ? holidayDates : undefined,
+      warning: holidayDates.length > 0 
+        ? `Attendance cannot be marked for ${holidayDates.length} date(s) as they are holidays.`
+        : undefined,
       summary
     });
   } catch (error) {

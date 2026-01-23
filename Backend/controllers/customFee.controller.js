@@ -153,7 +153,7 @@ console.log("createOrUpdateCustomFee",req.body);
         class: classToUse,
         section: sectionToUse,
         academicYear: String(academicYear).trim(),
-      });
+    });
     } catch (err) {
       console.error("Error fetching standard fee structure:", err);
       // Continue even if standard fee lookup fails
@@ -167,7 +167,7 @@ console.log("createOrUpdateCustomFee",req.body);
 
     // 💾 2. Save or update custom fee
     try {
-      const updated = await CustomFee.findOneAndUpdate(
+    const updated = await CustomFee.findOneAndUpdate(
         { student, academicYear: String(academicYear).trim() },
         { 
           totalFee, 
@@ -177,16 +177,16 @@ console.log("createOrUpdateCustomFee",req.body);
           lateFeePerDay, 
           reason 
         },
-        { new: true, upsert: true }
-      );
+      { new: true, upsert: true }
+    );
 
-      res.status(200).json({
-        success: true,
-        message: "Custom fee saved",
-        data: updated,
-        originalFee: standard?.totalFee || null,
-        discount: discount !== null ? discount : null,
-      });
+    res.status(200).json({
+      success: true,
+      message: "Custom fee saved",
+      data: updated,
+      originalFee: standard?.totalFee || null,
+      discount: discount !== null ? discount : null,
+    });
     } catch (dbError) {
       console.error("Database error saving custom fee:", dbError);
       console.error("Student ID:", student);

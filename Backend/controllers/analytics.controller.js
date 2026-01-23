@@ -11,6 +11,7 @@ import Parent from "../models/parent.model.js";
 import User from "../models/user.model.js";
 import mongoose from "mongoose";
 import { getAcademicYear } from "../config/appConfig.js";
+import { getCurrentAcademicYear, getAcademicYearDateRange, getPreviousAcademicYear } from "../utils/academicYear.js";
 
 // ===========================================
 // STUDENT ANALYTICS ENDPOINTS
@@ -709,15 +710,19 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
       return res.status(404).json({ message: "Teacher not found" });
     }
 
-    const { period = 30, class: className, section: sectionName } = req.query;
-    const daysAgo = new Date();
-    daysAgo.setDate(daysAgo.getDate() - parseInt(period));
+    const { academicYear: academicYearParam, class: className, section: sectionName } = req.query;
+    
+    // Use provided academic year or default to current academic year
+    const academicYear = academicYearParam || getCurrentAcademicYear();
+    
+    // Get date range for the academic year
+    const { startDate, endDate } = getAcademicYearDateRange(academicYear);
     
     // ✅ Debug logging for date issues
-    console.log('Date Debug Info:', {
-      currentTime: new Date().toISOString(),
-      daysAgo: daysAgo.toISOString(),
-      period: parseInt(period),
+    console.log('Academic Year Debug Info:', {
+      academicYear,
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
     });
 
@@ -751,27 +756,241 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
       });
     }
 
-    // Get students for assigned classes
-    const sectionQueries = teacher.sectionAssignments.map(({ className, section }) => ({
-      class: className,
-      section,
-    }));
+    // Helper function to determine academic year from a date
+    const getAcademicYearFromDate = (date) => {
+      if (!date) return null;
+      const dateObj = new Date(date);
+      const year = dateObj.getFullYear();
+      const month = dateObj.getMonth(); // 0-11
+      
+      // Academic year runs from June (5) to May (4)
+      if (month >= 5) { // June to December
+        return `${year}-${year + 1}`;
+      } else { // January to May
+        return `${year - 1}-${year}`;
+      }
+    };
 
-    const students = await Student.find({ $or: sectionQueries });
-    const studentIds = students.map(s => s._id);
+    // Helper function to get student's class for a specific academic year
+    const getStudentClassForAcademicYear = (student, targetAcademicYear) => {
+      const promotionHistory = student.promotionHistory || [];
+      const currentAcadYear = getCurrentAcademicYear();
+      const currentStartYear = parseInt(currentAcadYear.split('-')[0]);
+      const targetStartYear = parseInt(targetAcademicYear.split('-')[0]);
+      
+      // For future academic years, only include students who were actually promoted/enrolled
+      const isFutureYear = targetStartYear > currentStartYear;
+      
+      // Check if there's a revert record for this academic year (takes precedence)
+      const revertRecord = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      // Check if student was promoted IN this academic year (and not reverted)
+      const promotionInThisYear = promotionHistory.find(
+        p => p.academicYear === targetAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      if (revertRecord) {
+        return {
+          displayClass: revertRecord.toClass,
+          displaySection: revertRecord.toSection,
+          isValid: true
+        };
+      }
+      
+      if (promotionInThisYear) {
+        // Student was promoted in this year - show them in their OLD class (fromClass)
+        return {
+          displayClass: promotionInThisYear.fromClass,
+          displaySection: promotionInThisYear.fromSection,
+          isValid: true
+        };
+      }
+      
+      // Check if student was promoted in the PREVIOUS academic year (affects this year)
+      const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+      const revertInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+      );
+      
+      if (revertInPreviousYear) {
+        return {
+          displayClass: revertInPreviousYear.toClass,
+          displaySection: revertInPreviousYear.toSection,
+          isValid: true
+        };
+      }
+      
+      const promotionInPreviousYear = promotionHistory.find(
+        p => p.academicYear === previousAcademicYear && 
+             p.promotionType === 'promoted' && 
+             !p.reverted
+      );
+      
+      if (promotionInPreviousYear) {
+        // Student was promoted in previous year - show them in their NEW class (toClass) for this year
+        return {
+          displayClass: promotionInPreviousYear.toClass,
+          displaySection: promotionInPreviousYear.toSection,
+          isValid: true
+        };
+      }
+      
+      // For future academic years, don't use current class as fallback
+      // Only include students who have explicit promotion records
+      if (isFutureYear) {
+        return {
+          displayClass: null,
+          displaySection: null,
+          isValid: false
+        };
+      }
+      
+      // For current or past academic years, use current class if no promotions
+      // But exclude graduated students if they graduated in an academic year before the target year
+      if (student.status === 'graduated' || student.class === 'Graduated' || student.class === 'graduated') {
+        const graduationDate = student.graduationDate ? new Date(student.graduationDate) : null;
+        if (graduationDate) {
+          // Determine which academic year the student graduated in
+          const graduationAcademicYear = getAcademicYearFromDate(graduationDate);
+          
+          if (graduationAcademicYear) {
+            const [gradStartYear] = graduationAcademicYear.split('-').map(y => parseInt(y));
+            const [targetStartYear] = targetAcademicYear.split('-').map(y => parseInt(y));
+            
+            // If student graduated in an academic year before the target one, exclude them
+            if (gradStartYear < targetStartYear) {
+              return {
+                displayClass: null,
+                displaySection: null,
+                isValid: false
+              };
+            }
+            // If student graduated in the same or future academic year, include them
+          } else {
+            // Fallback: use date comparison if we can't determine academic year
+            const { startDate: yearStartDate } = getAcademicYearDateRange(targetAcademicYear);
+            if (graduationDate < yearStartDate) {
+              return {
+                displayClass: null,
+                displaySection: null,
+                isValid: false
+              };
+            }
+          }
+        } else {
+          // If status is graduated but no graduation date, exclude from future academic years
+          const [targetStartYear] = targetAcademicYear.split('-').map(y => parseInt(y));
+          const [currentStartYear] = getCurrentAcademicYear().split('-').map(y => parseInt(y));
+          if (targetStartYear > currentStartYear) {
+            return {
+              displayClass: null,
+              displaySection: null,
+              isValid: false
+            };
+          }
+        }
+      }
+      
+      // No promotion affecting this year - use current class (only for current/past years)
+      return {
+        displayClass: student.class,
+        displaySection: student.section,
+        isValid: true
+      };
+    };
+
+    // Get all students that might be in assigned classes (we'll filter by academic year after)
+    // Don't exclude graduated students at query level - we'll filter by graduation date later
+    const allPossibleStudents = await Student.find({}).populate('parent');
+    
+    // Filter students by their class in the selected academic year
+    // Exclude graduated students if they graduated in an academic year BEFORE the selected academic year
+    const { startDate: academicYearStartDate } = getAcademicYearDateRange(academicYear);
+    
+    // Parse selected academic year for comparison
+    const [selectedStartYear] = academicYear.split('-').map(y => parseInt(y));
+    
+    const students = allPossibleStudents.filter(student => {
+      // Check if student graduated - exclude if graduation academic year is before selected academic year
+      if (student.status === 'graduated' || student.class === 'Graduated' || student.class === 'graduated') {
+        const graduationDate = student.graduationDate ? new Date(student.graduationDate) : null;
+        
+        if (graduationDate) {
+          // Determine which academic year the student graduated in
+          const graduationAcademicYear = getAcademicYearFromDate(graduationDate);
+          
+          if (graduationAcademicYear) {
+            const [gradStartYear] = graduationAcademicYear.split('-').map(y => parseInt(y));
+            
+            // If student graduated in an academic year before the selected one, exclude them
+            if (gradStartYear < selectedStartYear) {
+              return false;
+            }
+            
+            // If student graduated in the same academic year as selected, include them (they were there for part of the year)
+            // If student graduated in a future academic year, include them (they haven't graduated yet)
+          } else {
+            // If we can't determine graduation academic year, use date comparison as fallback
+            if (graduationDate < academicYearStartDate) {
+              return false;
+            }
+          }
+        } else {
+          // If status is graduated but no graduation date, exclude from future academic years
+          // For current/past academic years, we might still want to include them if they were active
+          // But to be safe, if they're marked as graduated without a date, exclude them from future years
+          if (selectedStartYear > parseInt(getCurrentAcademicYear().split('-')[0])) {
+            return false;
+          }
+        }
+      }
+      
+      const { displayClass, displaySection, isValid } = getStudentClassForAcademicYear(student, academicYear);
+      
+      // Skip if student is not valid for this academic year
+      if (!isValid || !displayClass || !displaySection) {
+        return false;
+      }
+      
+      // Check if this student's class-section matches any of the teacher's assigned classes
+      return teacher.sectionAssignments.some(assignment => 
+        assignment.className === displayClass && assignment.section === displaySection
+      );
+    });
+
+    console.log('Total students found for academic year:', academicYear, ':', students.length);
+    console.log('Assigned classes:', teacher.sectionAssignments);
 
     // Filter by specific class and section if requested
     let filteredStudents = students;
     if (className && className !== 'all') {
       const [classNum, section] = className.split('-');
-      filteredStudents = students.filter(s => s.class === classNum && s.section === section);
+      filteredStudents = students.filter(s => {
+        const { displayClass, displaySection } = getStudentClassForAcademicYear(s, academicYear);
+        return displayClass === classNum && displaySection === section;
+      });
     }
     
     // Additional section filtering if section is specified separately
     if (sectionName && sectionName !== 'all' && className && className !== 'all') {
       const [classNum] = className.split('-');
-      filteredStudents = filteredStudents.filter(s => s.class === classNum && s.section === sectionName);
+      filteredStudents = filteredStudents.filter(s => {
+        const { displayClass, displaySection } = getStudentClassForAcademicYear(s, academicYear);
+        return displayClass === classNum && displaySection === sectionName;
+      });
     }
+    
+    console.log('Filtered Students count:', filteredStudents.length);
+    console.log('Filtered Students details:', filteredStudents.map(s => ({
+      name: s.name,
+      currentClass: s.class,
+      currentSection: s.section,
+      academicYearClass: getStudentClassForAcademicYear(s, academicYear)
+    })));
 
     const filteredStudentIds = filteredStudents.map(s => s._id);
 
@@ -780,7 +999,7 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
       {
         $match: {
           student: { $in: filteredStudentIds },
-          date: { $gte: daysAgo }
+          date: { $gte: startDate, $lte: endDate }
         }
       },
       {
@@ -818,23 +1037,14 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
       { $sort: { "_id.date": 1 } }
     ]);
 
-    // ✅ Debug logging for attendance data
-    console.log('Attendance Data Debug:', {
-      totalRecords: attendanceData.length,
-      sampleDates: attendanceData.slice(0, 3).map(record => ({
-        date: record._id.date,
-        present: record.present,
-        absent: record.absent
-      })),
-      lastDate: attendanceData[attendanceData.length - 1]?._id.date
-    });
+
 
     // Get assignment data with proper class-section filtering
     const assignmentData = await Assignment.aggregate([
       {
         $match: {
           teacherId: teacher._id,
-          createdAt: { $gte: daysAgo }
+          createdAt: { $gte: startDate, $lte: endDate }
         }
       },
       {
@@ -899,12 +1109,12 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
     const totalStudents = filteredStudents.length;
     const totalAttendanceRecords = await Attendance.countDocuments({
       student: { $in: filteredStudentIds },
-      date: { $gte: daysAgo }
+      date: { $gte: startDate, $lte: endDate }
     });
 
     const presentRecords = await Attendance.countDocuments({
       student: { $in: filteredStudentIds },
-      date: { $gte: daysAgo },
+      date: { $gte: startDate, $lte: endDate },
       status: "present"
     });
 
@@ -922,7 +1132,7 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
       {
         $match: {
           student: { $in: filteredStudentIds },
-          date: { $gte: daysAgo }
+          date: { $gte: startDate, $lte: endDate }
         }
       },
       {
@@ -1023,7 +1233,7 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
     });
 
     // Debug logging
-    console.log('Teacher Analytics Request:', { period, className, sectionName });
+    console.log('Teacher Analytics Request:', { academicYear, className, sectionName });
     console.log('Assigned Classes:', assignedClasses);
     console.log('Total Students Found:', students.length);
     console.log('Filtered Students:', filteredStudents.length);
@@ -1051,7 +1261,7 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
         {
           $match: {
             student: student._id,
-            date: { $gte: daysAgo }
+            date: { $gte: startDate, $lte: endDate }
           }
         },
         {
@@ -1111,7 +1321,8 @@ export const getTeacherAnalyticsDashboard = async (req, res) => {
         assignmentsCreated,
         pendingEvaluations,
         assignedClasses: assignedClasses,
-        topStudents
+        topStudents,
+        academicYear
       },
       attendanceData,
       classPerformance,
