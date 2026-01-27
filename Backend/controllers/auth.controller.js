@@ -116,6 +116,8 @@ export const signup = async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      accessToken,
+      refreshToken,
     });
   } catch (error) {
     console.log("Signup error", error.message);
@@ -346,6 +348,8 @@ export const login = async (req, res) => {
 					requiresEmail2FA: false,
 					requiresSMS2FA: false,
 					deviceTrusted: true,
+					accessToken,
+					refreshToken,
 				};
 				
 				// Only add mustChangePassword if it's true (explicitly check for true)
@@ -531,9 +535,10 @@ export const logout = async (req, res) => {
 };
 
 // this will refresh the access token
+// Supports: cookie (refreshToken) for web, req.body.refreshToken for React Native / non-cookie clients
 export const refreshToken = async (req, res) => {
 	try {
-		const refreshToken = req.cookies.refreshToken;
+		const refreshToken = req.cookies.refreshToken || req.body?.refreshToken;
 
 		if (!refreshToken) {
 			return res.status(401).json({ message: "No refresh token provided" });
@@ -555,7 +560,8 @@ export const refreshToken = async (req, res) => {
 			maxAge: 2 * 60 * 60 * 1000, // 2 hours (changed from 15 minutes)
 		});
 
-		res.json({ message: "Token refreshed successfully" });
+		// Include accessToken in body for mobile clients that cannot use cookies
+		res.json({ message: "Token refreshed successfully", accessToken });
 	} catch (error) {
 		console.log("Error in refreshToken controller", error.message);
 		res.status(500).json({ message: "Server error", error: error.message });

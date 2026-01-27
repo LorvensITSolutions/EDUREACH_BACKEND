@@ -26,6 +26,7 @@ const assignmentSchema = new mongoose.Schema({
   attachments: [String], // PDFs or references uploaded by the teacher
   submissions: [submissionSchema], // ✅ Students' file uploads
   evaluations: [studentEvaluationSchema], // ✅ Teacher evaluations per student
+  totalMarks: { type: Number, default: null }, // Total marks for the assignment
   createdAt: { type: Date, default: Date.now }
 });
 

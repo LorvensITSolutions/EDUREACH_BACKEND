@@ -4,9 +4,13 @@ import Student from "../models/student.model.js";
 import Parent from "../models/parent.model.js";
 
 // Middleware to protect all routes
+// Supports: cookie (accessToken) for web, Authorization Bearer for React Native / non-cookie clients
 export const protectRoute = async (req, res, next) => {
 	try {
-		const accessToken = req.cookies.accessToken;
+		let accessToken = req.cookies.accessToken;
+		if (!accessToken && req.headers.authorization?.startsWith("Bearer ")) {
+			accessToken = req.headers.authorization.slice(7);
+		}
 
 		if (!accessToken) {
 			return res.status(401).json({ message: "Unauthorized - No access token provided" });

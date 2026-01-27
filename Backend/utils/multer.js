@@ -17,7 +17,7 @@ const defaultStorage = multer.diskStorage({
 });
 export const upload = multer({ storage: defaultStorage });
 
-// ---------- PDF Assignments ----------
+// ---------- Assignment files: PDF + images ----------
 const assignmentStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, "uploads/assignments"),
   filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, "-")}`),
@@ -28,6 +28,15 @@ const pdfFilter = (req, file, cb) => {
   cb(null, true);
 };
 export const assignmentUpload = multer({ storage: assignmentStorage, fileFilter: pdfFilter });
+
+// PDF + images (jpg, jpeg, png, gif, webp) for assignment upload/edit
+const pdfOrImageFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  const allowed = [".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp"];
+  if (!allowed.includes(ext)) return cb(new Error("Only PDF and image files (jpg, png, gif, webp) allowed"), false);
+  cb(null, true);
+};
+export const assignmentFileUpload = multer({ storage: assignmentStorage, fileFilter: pdfOrImageFilter });
 
 // ---------- Image Uploads (Book covers, single student image) ----------
 const imageStorage = multer.diskStorage({

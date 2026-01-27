@@ -8,25 +8,34 @@ import {
   getSubmissions,
   getTeacherAssignments,
   updateAssignmentDueDate,
+  updateAssignment,
   deleteAssignment,
 } from "../controllers/assignment.controller.js";
 import { getChildAssignments } from "../controllers/assignment.controller.js";
 
 import { parentRoute, protectRoute, studentRoute, teacherRoute } from "../middleware/auth.middleware.js";
-import { upload } from "../utils/multer.js";
+import { upload, assignmentFileUpload } from "../utils/multer.js";
 
 const router = express.Router();
 
-// ✅ Upload assignment - TEACHER
+// Only run multer for multipart (FormData with files). Skip for JSON. Accepts PDF + images.
+const maybeUploadPdfs = (req, res, next) => {
+  const ct = (req.headers["content-type"] || "").toLowerCase();
+  if (ct.startsWith("multipart/form-data")) return assignmentFileUpload.array("pdfs", 3)(req, res, next);
+  next();
+};
+
+// ✅ Upload assignment - TEACHER (PDF + images)
 router.post(
   "/upload",
   protectRoute,
   teacherRoute,
-  upload.array("pdfs", 3),
+  assignmentFileUpload.array("pdfs", 3),
   uploadAssignment
 );
 
-router.patch("/:id/update-due-date", protectRoute, teacherRoute,updateAssignmentDueDate);
+router.patch("/:id/update-due-date", protectRoute, teacherRoute, updateAssignmentDueDate);
+router.patch("/:id/update", protectRoute, teacherRoute, maybeUploadPdfs, updateAssignment);
 
 // ✅ Evaluate assignment - TEACHER
 router.post(
@@ -64,11 +73,12 @@ router.get(
   getSingleAssignment
 );
 
+// ✅ Submit assignment - STUDENT (PDF + images)
 router.post(
   "/submit/:assignmentId",
   protectRoute,
-  studentRoute, // ✅ ADD THIS LINE
-  upload.single("file"),
+  studentRoute,
+  assignmentFileUpload.single("file"),
   submitAssignment
 ); 
 

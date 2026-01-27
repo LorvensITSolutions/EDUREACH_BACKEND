@@ -232,6 +232,8 @@ export const verifyEmail2FACode = async (req, res) => {
         mustChangePassword: user.mustChangePassword,
       },
       deviceToken, // Return device token if created
+      accessToken,
+      refreshToken,
     });
   } catch (error) {
     console.error("Verify email 2FA code error:", error);
