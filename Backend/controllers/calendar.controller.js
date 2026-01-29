@@ -1,6 +1,7 @@
 import { google } from "googleapis";
 import dotenv from "dotenv";
 import fs from "fs";
+import Event from "../models/event.model.js";
 
 dotenv.config();
 
@@ -132,17 +133,10 @@ const initializeCalendar = () => {
 
     calendar = google.calendar({ version: "v3", auth });
     isCalendarConfigured = true;
-    console.log("✓ Google Calendar initialized successfully");
-    console.log("  Calendar ID:", CALENDAR_ID);
-    console.log("  Timezone:", TIMEZONE);
+
     return true;
   } catch (err) {
-    console.error("✗ Failed to initialize Google Calendar auth:", err.message || err);
-    console.error("Common issues:");
-    console.error("  1. Invalid service account credentials");
-    console.error("  2. Service account doesn't have access to calendar");
-    console.error("  3. Google Calendar API not enabled");
-    console.error("  4. Incorrect CALENDAR_ID format");
+
     isCalendarConfigured = false;
     auth = null;
     calendar = null;
@@ -155,7 +149,6 @@ initializeCalendar();
 
 // Function to re-initialize calendar (useful if credentials are added after startup)
 export const reinitializeCalendar = () => {
-  console.log("Attempting to re-initialize calendar...");
   return initializeCalendar();
 };
 
@@ -163,45 +156,62 @@ export const createEvent = async (req, res) => {
   try {
     // Try to re-initialize if not configured (in case credentials were added)
     if (!isCalendarConfigured || !calendar) {
-      console.log("Calendar not configured, attempting re-initialization...");
       const reinitSuccess = reinitializeCalendar();
       if (!reinitSuccess) {
-        const missingVars = [];
-        const diagnostics = [];
-        
-        if (!CALENDAR_ID) {
-          missingVars.push("CALENDAR_ID");
-        } else {
-          diagnostics.push(`CALENDAR_ID is set: ${CALENDAR_ID.substring(0, 20)}...`);
+        // Fallback: save event to school DB so admins can still create events
+        const { summary, description, location, startTime, endTime, category } = req.body;
+        if (!summary || !startTime || !endTime) {
+          return res.status(400).json({ success: false, error: "Missing required fields" });
         }
-        
-        if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
-          missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
-        } else {
-          if (SERVICE_ACCOUNT_JSON) {
-            diagnostics.push("SERVICE_ACCOUNT_JSON is set (check if valid JSON)");
+        const startDate = new Date(startTime);
+        const endDateObj = new Date(endTime);
+        const dateOnly = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()));
+        const timeStr = `${String(startDate.getUTCHours()).padStart(2, "0")}:${String(startDate.getUTCMinutes()).padStart(2, "0")}`;
+        const endDateOnly = new Date(Date.UTC(endDateObj.getUTCFullYear(), endDateObj.getUTCMonth(), endDateObj.getUTCDate()));
+        const endTimeStr = `${String(endDateObj.getUTCHours()).padStart(2, "0")}:${String(endDateObj.getUTCMinutes()).padStart(2, "0")}`;
+        const categoryVal = category || "Academic";
+        const allowedCategories = ["Academic", "Sports", "Cultural", "Meeting", "Workshop"];
+        const safeCategory = allowedCategories.includes(categoryVal) ? categoryVal : "Academic";
+        try {
+          const dbEvent = await Event.create({
+            title: summary,
+            description: description || "",
+            category: safeCategory,
+            date: dateOnly,
+            time: timeStr,
+            endDate: endDateOnly,
+            endTime: endTimeStr,
+            location: location || "",
+            image: "https://placehold.co/400x200?text=Event",
+          });
+          try {
+            const { redis } = await import("../lib/redis.js");
+            await redis.del("all_events");
+          } catch (e) {
+            // ignore if redis not configured
           }
-          if (KEYFILEPATH) {
-            diagnostics.push(`SERVICE_ACCOUNT_PATH is set: ${KEYFILEPATH}`);
-            diagnostics.push(`File exists: ${fileExists(KEYFILEPATH) ? 'Yes' : 'No'}`);
-          }
+          // Use the exact start/end times from the request so calendar displays correct dates (avoids timezone shift)
+          const startIso = new Date(startTime).toISOString();
+          const endIso = new Date(endTime).toISOString();
+          return res.status(200).json({
+            success: true,
+            event: {
+              id: `db-event-${dbEvent._id}`,
+              summary: dbEvent.title,
+              description: dbEvent.description,
+              location: dbEvent.location,
+              start: { dateTime: startIso },
+              end: { dateTime: endIso },
+              extendedProperties: { private: { category: dbEvent.category } },
+            },
+          });
+        } catch (dbErr) {
+          console.error("DB event create fallback error:", dbErr);
+          return res.status(500).json({
+            success: false,
+            error: dbErr.message || "Failed to save event to school calendar.",
+          });
         }
-        
-        // Check common paths
-        const foundPaths = COMMON_SECRET_PATHS.filter(path => fileExists(path));
-        if (foundPaths.length > 0) {
-          diagnostics.push(`Found secret files at: ${foundPaths.join(', ')}`);
-        } else {
-          diagnostics.push("No secret files found in common paths");
-        }
-        
-        console.error("Calendar configuration diagnostics:", diagnostics);
-        
-        return res.status(503).json({ 
-          success: false, 
-          error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide.",
-          diagnostics: diagnostics // Include diagnostics in response for debugging
-        });
       }
     }
 
@@ -326,25 +336,84 @@ export const listEvents = async (req, res) => {
 // ✅ Update Event
 export const updateEvent = async (req, res) => {
   try {
-    // Validate calendar configuration
-    if (!isCalendarConfigured || !calendar) {
-      const missingVars = [];
-      if (!CALENDAR_ID) missingVars.push("CALENDAR_ID");
-      if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
-        missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
-      }
-      
-      return res.status(503).json({ 
-        success: false, 
-        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide." 
-      });
-    }
-
     const { eventId } = req.params;
     const { summary, description, location, startTime, endTime, category } = req.body;
 
     if (!eventId) {
       return res.status(400).json({ success: false, error: "Event ID required" });
+    }
+
+    // When calendar not configured: update DB event if this is a db-event id
+    if (!isCalendarConfigured || !calendar) {
+      if (eventId.startsWith("db-event-")) {
+        const mongoId = eventId.replace(/^db-event-/, "");
+        if (!summary || !startTime || !endTime) {
+          return res.status(400).json({ success: false, error: "Missing required fields" });
+        }
+        const startDate = new Date(startTime);
+        const endDateObj = new Date(endTime);
+        const dateOnly = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()));
+        const timeStr = `${String(startDate.getUTCHours()).padStart(2, "0")}:${String(startDate.getUTCMinutes()).padStart(2, "0")}`;
+        const endDateOnly = new Date(Date.UTC(endDateObj.getUTCFullYear(), endDateObj.getUTCMonth(), endDateObj.getUTCDate()));
+        const endTimeStr = `${String(endDateObj.getUTCHours()).padStart(2, "0")}:${String(endDateObj.getUTCMinutes()).padStart(2, "0")}`;
+        const categoryVal = category || "Academic";
+        const allowedCategories = ["Academic", "Sports", "Cultural", "Meeting", "Workshop"];
+        const safeCategory = allowedCategories.includes(categoryVal) ? categoryVal : "Academic";
+        try {
+          const dbEvent = await Event.findByIdAndUpdate(
+            mongoId,
+            {
+              title: summary,
+              description: description || "",
+              category: safeCategory,
+              date: dateOnly,
+              time: timeStr,
+              endDate: endDateOnly,
+              endTime: endTimeStr,
+              location: location || "",
+            },
+            { new: true }
+          );
+          if (!dbEvent) {
+            return res.status(404).json({ success: false, error: "Event not found" });
+          }
+          try {
+            const { redis } = await import("../lib/redis.js");
+            await redis.del("all_events");
+          } catch (e) {
+            // ignore if redis not configured
+          }
+          const startIso = new Date(startTime).toISOString();
+          const endIso = new Date(endTime).toISOString();
+          return res.status(200).json({
+            success: true,
+            event: {
+              id: `db-event-${dbEvent._id}`,
+              summary: dbEvent.title,
+              description: dbEvent.description,
+              location: dbEvent.location,
+              start: { dateTime: startIso },
+              end: { dateTime: endIso },
+              extendedProperties: { private: { category: dbEvent.category } },
+            },
+          });
+        } catch (dbErr) {
+          console.error("DB event update fallback error:", dbErr);
+          return res.status(500).json({
+            success: false,
+            error: dbErr.message || "Failed to update event.",
+          });
+        }
+      }
+      const missingVars = [];
+      if (!CALENDAR_ID) missingVars.push("CALENDAR_ID");
+      if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
+        missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
+      }
+      return res.status(503).json({
+        success: false,
+        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide.",
+      });
     }
 
     const formattedStart = new Date(startTime).toISOString();
@@ -358,12 +427,9 @@ export const updateEvent = async (req, res) => {
       end: { dateTime: formattedEnd, timeZone: TIMEZONE },
     };
 
-    // Add category as extended property if provided
     if (category) {
       updatedEvent.extendedProperties = {
-        private: {
-          category: category
-        }
+        private: { category },
       };
     }
 
@@ -383,24 +449,45 @@ export const updateEvent = async (req, res) => {
 // ✅ Delete Event
 export const deleteEvent = async (req, res) => {
   try {
-    // Validate calendar configuration
+    const { eventId } = req.params;
+
+    if (!eventId) {
+      return res.status(400).json({ success: false, error: "Event ID required" });
+    }
+
+    // When calendar not configured: delete from DB if this is a db-event id
     if (!isCalendarConfigured || !calendar) {
+      if (eventId.startsWith("db-event-")) {
+        const mongoId = eventId.replace(/^db-event-/, "");
+        try {
+          const deleted = await Event.findByIdAndDelete(mongoId);
+          if (!deleted) {
+            return res.status(404).json({ success: false, error: "Event not found" });
+          }
+          try {
+            const { redis } = await import("../lib/redis.js");
+            await redis.del("all_events");
+          } catch (e) {
+            // ignore if redis not configured
+          }
+          return res.status(200).json({ success: true, message: "Event deleted successfully" });
+        } catch (dbErr) {
+          console.error("DB event delete fallback error:", dbErr);
+          return res.status(500).json({
+            success: false,
+            error: dbErr.message || "Failed to delete event.",
+          });
+        }
+      }
       const missingVars = [];
       if (!CALENDAR_ID) missingVars.push("CALENDAR_ID");
       if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
         missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
       }
-      
-      return res.status(503).json({ 
-        success: false, 
-        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide." 
+      return res.status(503).json({
+        success: false,
+        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide.",
       });
-    }
-
-    const { eventId } = req.params;
-
-    if (!eventId) {
-      return res.status(400).json({ success: false, error: "Event ID required" });
     }
 
     await calendar.events.delete({

@@ -179,14 +179,13 @@ export const createHoliday = async (req, res) => {
       ));
     }
     
-    // Check if holiday already exists for this date
-    // Use UTC date range to match stored dates
+    // Check if holiday already exists for this date (same calendar day only)
     const dayStart = new Date(dateToStore);
     const dayEnd = new Date(dateToStore);
     dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
     
     const existingHoliday = await Holiday.findOne({
-      date: { $gte: dayStart, $lte: dayEnd },
+      date: { $gte: dayStart, $lt: dayEnd },
       isActive: true
     });
     
@@ -200,14 +199,36 @@ export const createHoliday = async (req, res) => {
     // Get current academic year if not provided
     const currentAcadYear = academicYear || getCurrentAcademicYear();
     
-    const holiday = await Holiday.create({
-      name,
-      date: dateToStore,
-      description: description || '',
-      type: type || 'school',
-      academicYear: currentAcadYear,
-      createdBy: req.user._id
-    });
+    let holiday;
+    try {
+      holiday = await Holiday.create({
+        name,
+        date: dateToStore,
+        description: description || '',
+        type: type || 'school',
+        academicYear: currentAcadYear,
+        createdBy: req.user._id
+      });
+    } catch (createErr) {
+      // If duplicate key and we already confirmed no active holiday: drop old unique index and retry once
+      if (createErr.code === 11000) {
+        try {
+          await Holiday.collection.dropIndex('date_1');
+        } catch (dropErr) {
+          // Index may not exist or already dropped
+        }
+        holiday = await Holiday.create({
+          name,
+          date: dateToStore,
+          description: description || '',
+          type: type || 'school',
+          academicYear: currentAcadYear,
+          createdBy: req.user._id
+        });
+      } else {
+        throw createErr;
+      }
+    }
     
     const populatedHoliday = await Holiday.findById(holiday._id)
       .populate('createdBy', 'name email');
@@ -275,7 +296,7 @@ export const updateHoliday = async (req, res) => {
       
       const existingHoliday = await Holiday.findOne({
         _id: { $ne: id },
-        date: { $gte: dayStart, $lte: dayEnd },
+        date: { $gte: dayStart, $lt: dayEnd },
         isActive: true
       });
       
@@ -315,11 +336,12 @@ export const updateHoliday = async (req, res) => {
 };
 
 // Delete holiday (admin only)
+// Hard delete so the same date can be reused for a new holiday (model has unique index on date)
 export const deleteHoliday = async (req, res) => {
   try {
     const { id } = req.params;
     
-    const holiday = await Holiday.findById(id);
+    const holiday = await Holiday.findByIdAndDelete(id);
     
     if (!holiday) {
       return res.status(404).json({
@@ -327,10 +349,6 @@ export const deleteHoliday = async (req, res) => {
         message: 'Holiday not found'
       });
     }
-    
-    // Soft delete by setting isActive to false
-    holiday.isActive = false;
-    await holiday.save();
     
     res.status(200).json({
       success: true,

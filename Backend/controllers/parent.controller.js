@@ -316,16 +316,31 @@ export const createParentWithChildren = async (req, res) => {
       children 
     } = req.body;
 
-    if (!parentName || !children || !Array.isArray(children)) {
+    // Validate required fields
+    if (!parentName || !parentName.trim()) {
       return res.status(400).json({ 
-        message: "Missing required fields: parentName, children (array)" 
+        message: "Parent name is required" 
+      });
+    }
+    if (!parentPhone || !parentPhone.trim()) {
+      return res.status(400).json({ 
+        message: "Parent phone number is required" 
+      });
+    }
+    if (!children || !Array.isArray(children) || children.length === 0) {
+      return res.status(400).json({ 
+        message: "At least one child is required" 
       });
     }
 
+    // Trim values
+    const trimmedName = parentName.trim();
+    const trimmedPhone = parentPhone.trim();
+
     // Check if parent already exists with same name and phone
     let parent = await Parent.findOne({ 
-      name: parentName,
-      phone: parentPhone 
+      name: trimmedName,
+      phone: trimmedPhone 
     });
     
     if (parent) {
@@ -335,12 +350,12 @@ export const createParentWithChildren = async (req, res) => {
     }
 
     // Generate parent credentials
-    const parentCredentials = await generateParentCredentialsByEmail(parentName);
+    const parentCredentials = await generateParentCredentialsByEmail(trimmedName);
 
     // Create parent
     parent = await Parent.create({
-      name: parentName,
-      phone: parentPhone || "",
+      name: trimmedName,
+      phone: trimmedPhone,
       generatedCredentials: parentCredentials
     });
 
@@ -432,6 +447,87 @@ export const createParentWithChildren = async (req, res) => {
 
   } catch (error) {
     console.error("Create parent with children error:", error);
-    res.status(500).json({ message: "Server error", error: error.message });
+    
+    // Handle Mongoose validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message).join(', ');
+      return res.status(400).json({ 
+        message: `Validation error: ${messages}` 
+      });
+    }
+    
+    // Handle duplicate key errors
+    if (error.code === 11000) {
+      return res.status(400).json({ 
+        message: "Parent with this name and phone already exists" 
+      });
+    }
+    
+    res.status(500).json({ 
+      message: "Server error", 
+      error: error.message 
+    });
+  }
+};
+
+// Update parent phone number
+export const updateParentPhone = async (req, res) => {
+  try {
+    const { parentId } = req.params;
+    const { phone } = req.body;
+
+    // Validate required fields
+    if (!phone || !phone.trim()) {
+      return res.status(400).json({ 
+        message: "Phone number is required" 
+      });
+    }
+
+    const trimmedPhone = phone.trim();
+    
+    // Validate phone number format (10 digits)
+    if (!/^\d{10}$/.test(trimmedPhone)) {
+      return res.status(400).json({ 
+        message: "Phone number must be exactly 10 digits" 
+      });
+    }
+
+    // Find parent
+    const parent = await Parent.findById(parentId);
+    if (!parent) {
+      return res.status(404).json({ message: "Parent not found" });
+    }
+
+    // Update phone number
+    parent.phone = trimmedPhone;
+    await parent.save();
+
+    // Invalidate parent cache
+    await invalidateParentCache();
+
+    res.status(200).json({
+      message: "Parent phone number updated successfully",
+      parent: {
+        _id: parent._id,
+        name: parent.name,
+        phone: parent.phone
+      }
+    });
+
+  } catch (error) {
+    console.error("Update parent phone error:", error);
+    
+    // Handle Mongoose validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message).join(', ');
+      return res.status(400).json({ 
+        message: `Validation error: ${messages}` 
+      });
+    }
+    
+    res.status(500).json({ 
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };

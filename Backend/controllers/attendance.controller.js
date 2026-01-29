@@ -3,9 +3,61 @@ import Student from '../models/student.model.js';
 import Teacher from '../models/teacher.model.js';
 import Parent from "../models/parent.model.js";
 import Holiday from '../models/holiday.model.js';
-import xlsx from 'xlsx'; 
+import xlsx from 'xlsx';
+import { getCurrentAcademicYear, getPreviousAcademicYear } from '../utils/academicYear.js';
 import { sendAbsenceAlertEmail } from '../utils/emailService.js'; // Nodemailer utility
 import PDFDocument from 'pdfkit';
+
+/** Academic year from a date string (YYYY-MM-DD). June–May. */
+function getAcademicYearFromDate(dateStr) {
+  if (!dateStr) return getCurrentAcademicYear();
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return getCurrentAcademicYear();
+  const year = d.getFullYear();
+  const month = d.getMonth();
+  return month >= 5 ? `${year}-${year + 1}` : `${year - 1}-${year}`;
+}
+
+/** Effective class for a student in targetAcademicYear; null if not in that year. */
+function getStudentClassForAcademicYear(student, targetAcademicYear) {
+  const promotionHistory = student.promotionHistory || [];
+  const targetStartYear = parseInt(String(targetAcademicYear).split('-')[0], 10);
+  const currentStartYear = parseInt(getCurrentAcademicYear().split('-')[0], 10);
+  const isFutureYear = !Number.isNaN(targetStartYear) && !Number.isNaN(currentStartYear) && targetStartYear > currentStartYear;
+
+  const revertRecord = promotionHistory.find(
+    (p) => p.academicYear === targetAcademicYear && p.promotionType === 'reverted'
+  );
+  if (revertRecord) {
+    return { displayClass: revertRecord.toClass, displaySection: revertRecord.toSection };
+  }
+
+  const promotionInThisYear = promotionHistory.find(
+    (p) => p.academicYear === targetAcademicYear && p.promotionType === 'promoted' && !p.reverted
+  );
+  if (promotionInThisYear) {
+    return { displayClass: promotionInThisYear.fromClass, displaySection: promotionInThisYear.fromSection };
+  }
+
+  const previousAcademicYear = getPreviousAcademicYear(targetAcademicYear);
+  const revertInPreviousYear = promotionHistory.find(
+    (p) => p.academicYear === previousAcademicYear && p.promotionType === 'reverted'
+  );
+  if (revertInPreviousYear) {
+    return { displayClass: revertInPreviousYear.toClass, displaySection: revertInPreviousYear.toSection };
+  }
+
+  const promotionInPreviousYear = promotionHistory.find(
+    (p) => p.academicYear === previousAcademicYear && p.promotionType === 'promoted' && !p.reverted
+  );
+  if (promotionInPreviousYear) {
+    return { displayClass: promotionInPreviousYear.toClass, displaySection: promotionInPreviousYear.toSection };
+  }
+
+  if (isFutureYear) return null;
+
+  return { displayClass: student.class, displaySection: student.section };
+}
 
 export const markAttendance = async (req, res) => {
   try {
@@ -387,79 +439,102 @@ export const getDailyAttendanceSummary = async (req, res) => {
       return res.status(400).json({ message: "Date is required" });
     }
 
+    const academicYear = getAcademicYearFromDate(date);
     const targetDate = new Date(date);
     const dayStart = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0, 0);
     const dayEnd = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59, 999);
 
     let students = [];
-    
+    let assignedClassKeys = null;
+
     // Get students based on user role
     if (req.user.role === "admin") {
-      // Admin can see all students
       students = await Student.find();
     } else if (req.user.role === "teacher") {
-      // Teacher can only see their assigned students
       const teacher = await Teacher.findById(req.user.teacherId);
       if (!teacher) {
         return res.status(404).json({ message: "Teacher not found" });
       }
-
-      const sectionQueries = teacher.sectionAssignments.map(({ className, section }) => ({
-        class: className,
-        section,
+      const sectionQueries = teacher.sectionAssignments.map(({ className: assignedClass, section: assignedSection }) => ({
+        class: assignedClass,
+        section: assignedSection,
       }));
-
+      assignedClassKeys = teacher.sectionAssignments.map(
+        ({ className: c, section: sec }) => `${c}-${sec}`
+      );
+      // Students currently in assigned classes
       students = await Student.find({ $or: sectionQueries });
+      // Also include students who were in these classes and promoted this academic year (so they still count for attendance in the class they left)
+      const promotedFromQueries = teacher.sectionAssignments.map(({ className: assignedClass, section: assignedSection }) => ({
+        promotionHistory: {
+          $elemMatch: {
+            academicYear,
+            promotionType: 'promoted',
+            fromClass: assignedClass,
+            fromSection: assignedSection,
+          },
+        },
+      }));
+      const promotedStudents = await Student.find({ $or: promotedFromQueries });
+      const existingIds = new Set(students.map((s) => s._id.toString()));
+      for (const s of promotedStudents) {
+        if (!existingIds.has(s._id.toString())) {
+          students.push(s);
+          existingIds.add(s._id.toString());
+        }
+      }
     } else {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    // Apply class and section filters if provided
-    if (className && className !== 'all' && className !== null) {
-      const [classNum, section] = className.split('-');
-      students = students.filter(s => s.class === classNum && s.section === section);
-    }
-    
-    // Additional section filtering if section is specified separately
-    if (sectionName && sectionName !== 'all' && className && className !== 'all' && className !== null) {
-      const [classNum] = className.split('-');
-      students = students.filter(s => s.class === classNum && s.section === sectionName);
-    }
-
-    console.log('Daily Summary Request:', { date, className, sectionName });
-    console.log('Total Students Found:', students.length);
-    console.log('Filter Applied:', className && className !== 'all' ? `Class ${className}` : 'All assigned classes');
-
-    const studentIds = students.map(s => s._id);
-
-    // Get attendance records for the specific date
-    const attendanceRecords = await Attendance.find({
-      student: { $in: studentIds },
-      date: { $gte: dayStart, $lte: dayEnd }
+    // Filter by effective class for the request's academic year (so total matches presents + absents per year)
+    students = students.filter((s) => {
+      const info = getStudentClassForAcademicYear(s, academicYear);
+      if (!info || !info.displayClass) return false;
+      const classKey = `${info.displayClass}-${info.displaySection}`;
+      if (className && className !== 'all' && className !== null) {
+        return classKey === className;
+      }
+      if (assignedClassKeys) return assignedClassKeys.includes(classKey);
+      return true;
     });
 
-    // Calculate summary statistics
+    // Optional extra section filter if provided separately
+    if (sectionName && sectionName !== 'all' && className && className !== 'all' && className !== null) {
+      const [classNum] = className.split('-');
+      students = students.filter((s) => {
+        const info = getStudentClassForAcademicYear(s, academicYear);
+        return info && info.displayClass === classNum && info.displaySection === sectionName;
+      });
+    }
+
+    console.log('Daily Summary Request:', { date, className, sectionName, academicYear });
+    console.log('Total Students Found (by academic year):', students.length);
+
+    const studentIds = students.map((s) => s._id);
+
+    const attendanceRecords = await Attendance.find({
+      student: { $in: studentIds },
+      date: { $gte: dayStart, $lte: dayEnd },
+    });
+
     const totalStudents = students.length;
-    const presents = attendanceRecords.filter(record => record.status === 'present').length;
-    const absents = attendanceRecords.filter(record => record.status === 'absent').length;
-    
-    // Calculate attendance percentage
-    const attendancePercentage = totalStudents > 0 
-      ? Math.round((presents / totalStudents) * 100)
-      : 0;
+    const presents = attendanceRecords.filter((r) => r.status === 'present').length;
+    const absents = attendanceRecords.filter((r) => r.status === 'absent').length;
+    const attendancePercentage =
+      totalStudents > 0 ? Math.round((presents / totalStudents) * 100) : 0;
 
     const responseData = {
       totalStudents,
       presents,
       absents,
       attendancePercentage,
-      date: dayStart.toISOString().slice(0, 10)
+      date: dayStart.toISOString().slice(0, 10),
     };
-    
-    console.log('Daily Summary Response:', responseData);
-    
-    res.status(200).json(responseData);
 
+    console.log('Daily Summary Response:', responseData);
+
+    res.status(200).json(responseData);
   } catch (error) {
     console.error("Error fetching daily attendance summary:", error);
     res.status(500).json({ message: "Server error", error: error.message });

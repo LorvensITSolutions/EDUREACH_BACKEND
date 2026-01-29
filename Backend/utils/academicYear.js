@@ -4,6 +4,19 @@
  */
 
 /**
+ * Academic year from a date string (YYYY-MM-DD). June–May.
+ * Used so attendance/student lists use the same academic year as the selected date.
+ */
+export const getAcademicYearFromDate = (dateStr) => {
+  if (!dateStr) return getCurrentAcademicYear();
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return getCurrentAcademicYear();
+  const year = d.getFullYear();
+  const month = d.getMonth();
+  return month >= 5 ? `${year}-${year + 1}` : `${year - 1}-${year}`;
+};
+
+/**
  * Get current academic year in "YYYY-YYYY" format
  * Assumes academic year runs from June to May (standard in many countries)
  * You can modify this if your academic year runs differently (e.g., Jan-Dec)

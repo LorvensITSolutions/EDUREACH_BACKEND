@@ -8,7 +8,7 @@ import TeacherAttendance from "../models/TeacherAttendance.js";
 import { generateTeacherId, generateTeacherCredentials } from "../utils/credentialGenerator.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
 import { validateTeacherAssignment, validateTeacherData, checkDuplicateAssignment } from "../utils/teacherValidation.js";
-import { getCurrentAcademicYear, getPreviousAcademicYear } from "../utils/academicYear.js";
+import { getCurrentAcademicYear, getPreviousAcademicYear, getAcademicYearFromDate } from "../utils/academicYear.js";
 import xlsx from "xlsx";
 import fs from "fs";
 import path from "path";
@@ -472,35 +472,37 @@ export const getAssignedStudentsWithAttendance = async (req, res) => {
     // Get assigned classes list for frontend dropdown (ensures all assigned classes appear)
     const assignedClasses = teacher.sectionAssignments.map(sa => `${sa.className}-${sa.section}`);
 
-    // Get current academic year to check promotion history
-    const currentAcademicYear = getCurrentAcademicYear();
+    // Use academic year from request date so list matches daily summary (same as attendance controller)
+    const { date: queryDate } = req.query;
+    const academicYear = queryDate ? getAcademicYearFromDate(queryDate) : getCurrentAcademicYear();
 
-    // Build query to find students:
-    // 1. Students whose current database class matches assigned classes
-    // 2. Students who were in assigned classes during current academic year (based on promotion history)
-    const promotionQueries = teacher.sectionAssignments.map(({ className, section }) => ({
+    // 1. Students currently in assigned classes (by current class/section in DB)
+    let students = await Student.find({ $or: sectionQueries })
+      .select('name studentId class section parent promotionHistory')
+      .lean();
+
+    // 2. Also include students who were in these classes and promoted this academic year (promoting to next class next year)
+    const promotedFromQueries = teacher.sectionAssignments.map(({ className, section }) => ({
       promotionHistory: {
         $elemMatch: {
-          academicYear: currentAcademicYear,
+          academicYear,
           promotionType: 'promoted',
           fromClass: className,
           fromSection: section,
-          reverted: { $ne: true }
-        }
-      }
+        },
+      },
     }));
-
-    // Combine both queries: current class OR was in this class during current academic year
-    const combinedQueries = [
-      ...sectionQueries, // Students currently in assigned classes
-      ...promotionQueries // Students who were in assigned classes this year (before promotion)
-    ];
-
-    // Fetch students with promotion history included
-    // Use lean() for better performance, but ensure promotionHistory is included
-    const students = await Student.find({ $or: combinedQueries })
+    const promotedStudents = await Student.find({ $or: promotedFromQueries })
       .select('name studentId class section parent promotionHistory')
       .lean();
+
+    const existingIds = new Set(students.map((s) => s._id.toString()));
+    for (const s of promotedStudents) {
+      if (!existingIds.has(s._id.toString())) {
+        students.push(s);
+        existingIds.add(s._id.toString());
+      }
+    }
     
     // Debug: Log assigned classes to ensure all are included
     console.log(`Teacher ${teacher.name} assigned to ${assignedClasses.length} class-sections:`, 
@@ -508,12 +510,9 @@ export const getAssignedStudentsWithAttendance = async (req, res) => {
     console.log(`Found ${students.length} students across all assigned classes`);
     const studentIds = students.map((s) => s._id);
 
-    const { date } = req.query;
     let attendanceQuery = { student: { $in: studentIds } };
-    let targetDate = null;
-
-    if (date) {
-      targetDate = new Date(date);
+    if (queryDate) {
+      const targetDate = new Date(queryDate);
       attendanceQuery.date = {
         $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
         $lte: new Date(targetDate.setHours(23, 59, 59, 999)),

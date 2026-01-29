@@ -9,8 +9,8 @@ const holidaySchema = new mongoose.Schema({
   },
   date: {
     type: Date,
-    required: true,
-    unique: true
+    required: true
+    // Uniqueness enforced by partial index below (only for isActive: true) so delete+re-add same day works
   },
   description: {
     type: String,
@@ -42,5 +42,10 @@ const holidaySchema = new mongoose.Schema({
 // Index for efficient date queries
 holidaySchema.index({ date: 1, isActive: 1 });
 holidaySchema.index({ academicYear: 1, isActive: 1 });
+// Only one active holiday per date; inactive (deleted) rows don't block re-adding same date
+holidaySchema.index(
+  { date: 1 },
+  { unique: true, partialFilterExpression: { isActive: true } }
+);
 
 export default mongoose.model('Holiday', holidaySchema);

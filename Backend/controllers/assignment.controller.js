@@ -332,6 +332,44 @@ export const getSubmissions = async (req, res) => {
   }
 };
 
+// GET /api/assignments/:id/submission-file?studentId=... — stream submission file (PDF/image) for download
+export const getSubmissionFile = async (req, res) => {
+  try {
+    const { id: assignmentId } = req.params;
+    const { studentId } = req.query;
+    if (!studentId) {
+      return res.status(400).json({ message: "studentId is required" });
+    }
+
+    const assignment = await Assignment.findById(assignmentId);
+    if (!assignment) {
+      return res.status(404).json({ message: "Assignment not found" });
+    }
+    if (assignment.teacherId?.toString() !== req.user.teacherId?.toString()) {
+      return res.status(403).json({ message: "Not authorized to access this assignment" });
+    }
+
+    const submission = assignment.submissions.find(
+      (s) => s.studentId && s.studentId.toString() === studentId
+    );
+    if (!submission || !submission.file) {
+      return res.status(404).json({ message: "Submission or file not found" });
+    }
+
+    const filePath = path.isAbsolute(submission.file)
+      ? submission.file
+      : path.join(process.cwd(), submission.file);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ message: "File not found on server" });
+    }
+
+    const fileName = path.basename(submission.file);
+    res.download(filePath, fileName);
+  } catch (err) {
+    console.error("Submission file download error:", err.message);
+    res.status(500).json({ message: "Download failed", error: err.message });
+  }
+};
 
 export const getTeacherAssignments = async (req, res) => {
   try {

@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const parentSchema = new mongoose.Schema({
   name: { type: String, required: true },
-  phone: String,
+  phone: { type: String, required: true },
   children: [{ type: mongoose.Schema.Types.ObjectId, ref: "Student" }],
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   generatedCredentials: { // Store parent credentials

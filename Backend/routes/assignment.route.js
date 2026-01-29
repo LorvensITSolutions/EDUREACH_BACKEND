@@ -6,6 +6,7 @@ import {
   getSingleAssignment,
   submitAssignment,
   getSubmissions,
+  getSubmissionFile,
   getTeacherAssignments,
   updateAssignmentDueDate,
   updateAssignment,
@@ -90,5 +91,12 @@ router.get(
   getSubmissions
 );
 
+// ✅ Get submission file for download (PDF/image) — ?studentId=...
+router.get(
+  "/:id/submission-file",
+  protectRoute,
+  teacherRoute,
+  getSubmissionFile
+);
 
 export default router;
